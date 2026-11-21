@@ -30,13 +30,14 @@ export async function syncNow() {
   if (inFlight) return inFlight;
   inFlight = (async () => {
     if (!navigator.onLine || !(await getToken())) return false;
-    const [localProgress, localSessions, localPrefs, meta] = await Promise.all([
-      db.entries('progress'), db.all('sessions'), db.get('kv', 'prefs'), db.get('kv', 'syncMeta'),
+    const [localProgress, localSessions, localPrefs, localArticles, meta] = await Promise.all([
+      db.entries('progress'), db.all('sessions'), db.get('kv', 'prefs'), db.get('kv', 'articles'), db.get('kv', 'syncMeta'),
     ]);
     const remote = await readAppState();
     const r = remote.data || {};
     const progress = mergeMap(Object.fromEntries(localProgress), r.progress);
     const prefs = mergeMap(localPrefs || {}, r.prefs);
+    const articles = mergeMap(localArticles || {}, r.articles);
     const sessMap = new Map((r.sessions || []).map((s) => [s.id, s]));
     for (const s of localSessions) {
       const o = sessMap.get(s.id);
@@ -51,14 +52,19 @@ export async function syncNow() {
     }
     const localIdsSet = new Set(localSessions.map((s) => s.id));
     for (const s of sessions) if (!localIdsSet.has(s.id)) await db.set('sessions', null, s);
+    // Gộp lại lần nữa với bản trên máy, phòng khi anh vừa sửa trong lúc đang đồng bộ.
+    Object.assign(prefs, mergeMap(prefs, await db.get('kv', 'prefs')));
+    Object.assign(articles, mergeMap(articles, await db.get('kv', 'articles')));
     await db.set('kv', 'prefs', prefs);
+    await db.set('kv', 'articles', articles);
 
     // Ghi lên Drive nếu có thay đổi
-    const payload = { v: 1, progress: sortKeys(progress), prefs: sortKeys(prefs), sessions };
+    const payload = { v: 1, progress: sortKeys(progress), prefs: sortKeys(prefs), articles: sortKeys(articles), sessions };
     const remoteNorm = {
       v: 1,
       progress: sortKeys(r.progress || {}),
       prefs: sortKeys(r.prefs || {}),
+      articles: sortKeys(r.articles || {}),
       sessions: [...(r.sessions || [])].sort((a, b) => a.start - b.start),
     };
     let fileId = remote.fileId;

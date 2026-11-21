@@ -10,6 +10,10 @@ import {
 import { syncNow, scheduleSync, onSynced, lastSyncAt, getPref, setPref } from './sync.js';
 import { Reader } from './reader.js';
 import { esc, icon, fmtMB, fmtTime, dayKey, toast, parseName } from './ui.js';
+import {
+  loadArticles, upsertArticle, deleteArticle, restoreArticle, activeList, tagCounts,
+  extractUrl, cleanUrl, titleFromUrl, normTag,
+} from './articles.js';
 
 const app = document.getElementById('app');
 
@@ -31,6 +35,9 @@ const S = {
   route: '',
   reader: null,
   readingId: null,
+  articles: {},
+  artTag: '',
+  artQuery: '',
 };
 
 // ---------------- Khởi động ----------------
@@ -44,9 +51,10 @@ async function boot() {
       if (!S.reader) location.reload(); else S.pendingReload = true;
     });
   }
-  const [settings, lib, progressEntries, sessions, local] = await Promise.all([
-    db.get('kv', 'settings'), db.get('kv', 'library'), db.entries('progress'), db.all('sessions'), localIds(),
+  const [settings, lib, progressEntries, sessions, local, articles] = await Promise.all([
+    db.get('kv', 'settings'), db.get('kv', 'library'), db.entries('progress'), db.all('sessions'), localIds(), loadArticles(),
   ]);
+  S.articles = articles;
   if (settings) S.settings = { ...S.settings, ...settings };
   if (lib) { S.books = lib.books || []; S.scannedAt = lib.scannedAt || 0; }
   S.progress = Object.fromEntries(progressEntries);
@@ -63,8 +71,14 @@ async function boot() {
   });
   app.addEventListener('click', onClick);
   app.addEventListener('change', onChange);
+  app.addEventListener('input', onInput);
+  app.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.id === 'art-url') { e.preventDefault(); addFromInput(); }
+  });
 
+  const shared = readShareParams();
   route();
+  if (shared) openArticleEditor(shared);
   await refresh();
 }
 
@@ -104,9 +118,10 @@ function handleErr(e) {
 }
 
 async function reloadFromDb() {
-  const [p, s] = await Promise.all([db.entries('progress'), db.all('sessions')]);
+  const [p, s, a] = await Promise.all([db.entries('progress'), db.all('sessions'), loadArticles()]);
   S.progress = Object.fromEntries(p);
   S.sessions = s;
+  S.articles = a;
   runPolicy();
   if (!S.reader) renderView();
 }
@@ -318,6 +333,7 @@ function renderView() {
   if (S.reader) return;
   const h = S.route || '#/';
   if (h.startsWith('#/settings')) return renderSettings();
+  if (h.startsWith('#/articles')) return renderArticles();
   if (h.startsWith('#/stats')) return renderPlaceholder('stats');
   if (h.startsWith('#/hl')) return renderPlaceholder('hl');
   return renderLibrary();
@@ -511,7 +527,7 @@ function bookRow(b, inSeries) {
 
 function nav(active) {
   const item = (key, href, ic, label) => `<a href="${href}" class="${active === key ? 'on' : ''}" ${active === key ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></a>`;
-  return `<nav class="nav" aria-label="Điều hướng chính">${item('lib', '#/', 'library', 'Thư viện')}${item('stats', '#/stats', 'stats', 'Thống kê')}${item('hl', '#/hl', 'pen', 'Highlight')}</nav>`;
+  return `<nav class="nav" aria-label="Điều hướng chính">${item('lib', '#/', 'library', 'Thư viện')}${item('art', '#/articles', 'article', 'Bài viết')}${item('stats', '#/stats', 'stats', 'Thống kê')}${item('hl', '#/hl', 'pen', 'Highlight')}</nav>`;
 }
 
 function renderWelcome() {
@@ -533,6 +549,161 @@ function renderPlaceholder(which) {
     ? `<h1>Thống kê</h1><div class="card"><p><strong>Thống kê chi tiết sẽ có ở giai đoạn P2</strong> (heatmap, phút đọc theo thể loại và theo bộ).</p><p class="muted">App đã bắt đầu ghi phiên đọc từ bây giờ, hiện có <span class="tnum">${sessions}</span> phiên hợp lệ, nên khi lên P2 sẽ có sẵn dữ liệu.</p></div>`
     : `<h1>Highlight</h1><div class="card"><p><strong>Highlight và gửi sang Notion “Reflection” sẽ có ở giai đoạn P3.</strong></p><p class="muted">P1 tập trung vào trải nghiệm đọc và tải offline.</p></div>`;
   app.innerHTML = `<div class="page"><main class="main">${body}</main>${nav(which)}</div>`;
+}
+
+// ---------------- Màn Bài viết ----------------
+// Nhận link được chia sẻ từ app khác (Web Share Target): ./?title=…&text=…&url=…
+function readShareParams() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('url') && !q.has('text') && !q.has('title')) return null;
+  const raw = q.get('url') || extractUrl(q.get('text')) || extractUrl(q.get('title'));
+  history.replaceState(null, '', `${location.pathname}#/articles`);
+  S.route = '#/articles';
+  if (!raw) { setTimeout(() => toast('Không tìm thấy link trong nội dung được chia sẻ'), 300); return null; }
+  let title = (q.get('title') || '').trim();
+  if (!title) title = (q.get('text') || '').replace(raw, '').trim();
+  if (/^https?:\/\//.test(title)) title = '';
+  return { url: raw, title };
+}
+
+function fmtDate(ts) {
+  return new Date(ts).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function filteredArticles() {
+  const q = S.artQuery.trim().toLowerCase();
+  return activeList(S.articles).filter((a) => (!S.artTag || a.tags.includes(S.artTag))
+    && (!q || a.title.toLowerCase().includes(q) || a.source.toLowerCase().includes(q)));
+}
+
+function renderArticles() {
+  const all = activeList(S.articles);
+  const tags = tagCounts(all);
+  if (S.artTag && !tags.some(([t]) => t === S.artTag)) S.artTag = '';
+  app.innerHTML = `
+    <div class="page">
+      <header class="top"><div><h1>Bài viết</h1><span class="muted sm tnum">${all.length} bài đã đọc</span></div></header>
+      <main class="main">
+        <section class="card form" aria-label="Thêm bài đã đọc">
+          <label for="art-url">Thêm bài đã đọc</label>
+          <div class="inline">
+            <input id="art-url" type="url" inputmode="url" placeholder="Dán link bài viết" autocomplete="off">
+            <button type="button" class="btn primary" data-action="art-add">Thêm</button>
+          </div>
+          <p class="muted xs">Trên điện thoại: trong app Substack bấm <strong>Chia sẻ → Đọc sách</strong>.</p>
+        </section>
+        ${all.length ? `
+        <section class="art-tools" aria-label="Lọc bài viết">
+          <input id="art-q" type="search" placeholder="Tìm theo tiêu đề hoặc nguồn" value="${esc(S.artQuery)}" autocomplete="off" aria-label="Tìm bài viết">
+          <div class="tagbar" role="group" aria-label="Lọc theo tag">
+            <button type="button" class="tag ${S.artTag ? '' : 'on'}" data-action="art-tag" data-tag="" aria-pressed="${!S.artTag}">Tất cả <span class="tnum">${all.length}</span></button>
+            ${tags.map(([t, n]) => `<button type="button" class="tag ${S.artTag === t ? 'on' : ''}" data-action="art-tag" data-tag="${esc(t)}" aria-pressed="${S.artTag === t}">${esc(t)} <span class="tnum">${n}</span></button>`).join('')}
+          </div>
+        </section>
+        <section class="list" id="art-list" aria-label="Danh sách bài viết">${artListHtml()}</section>` : `
+        <div class="card empty"><p>Chưa có bài nào. Đọc xong một bài trên Substack thì chia sẻ vào đây hoặc dán link ở trên.</p></div>`}
+      </main>
+      ${nav('art')}
+    </div>`;
+}
+
+function artListHtml() {
+  const list = filteredArticles();
+  if (!list.length) return '<p class="muted sm">Không có bài nào khớp.</p>';
+  return list.map((a) => `
+    <article class="card art">
+      <a class="art-link" href="${esc(a.url)}" target="_blank" rel="noopener">
+        <span class="t2">${esc(a.title)}</span>
+        <span class="muted xs">${esc(a.source)} · đọc ${fmtDate(a.readAt)}</span>
+      </a>
+      <div class="art-foot">
+        <div class="tags">${a.tags.map((t) => `<button type="button" class="tag sm" data-action="art-tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('') || '<span class="muted xs">Chưa có tag</span>'}</div>
+        <div class="art-actions">
+          <button type="button" class="icon-btn sm" data-action="art-edit" data-id="${esc(a.id)}" aria-label="Sửa tiêu đề và tag">${icon('edit', 18)}</button>
+          <button type="button" class="icon-btn sm" data-action="art-del" data-id="${esc(a.id)}" aria-label="Xoá bài">${icon('trash', 18)}</button>
+        </div>
+      </div>
+    </article>`).join('');
+}
+
+function addFromInput() {
+  const el = app.querySelector('#art-url');
+  const raw = extractUrl(el?.value) || el?.value?.trim();
+  if (!raw || !cleanUrl(raw)) { toast('Link không hợp lệ'); el?.focus(); return; }
+  openArticleEditor({ url: raw, title: '' });
+}
+
+// Hộp sửa: tiêu đề + tag (gõ rồi Enter hoặc dấu phẩy để thêm; chạm gợi ý để thêm nhanh).
+function openArticleEditor({ url, title }) {
+  const id = cleanUrl(url);
+  if (!id) { toast('Link không hợp lệ'); return; }
+  const prev = S.articles[id] && !S.articles[id].deleted ? S.articles[id] : null;
+  let tags = prev ? [...prev.tags] : [];
+  const allTags = tagCounts(activeList(S.articles)).map(([t]) => t);
+  document.querySelector('dialog.sheet')?.remove();
+  const dlg = document.createElement('dialog');
+  dlg.className = 'sheet';
+  dlg.setAttribute('aria-label', 'Lưu bài đã đọc');
+  dlg.innerHTML = `
+    <form method="dialog" class="sheet-body">
+      <h2 class="sheet-title">${prev ? 'Sửa bài đã đọc' : 'Lưu bài đã đọc'}</h2>
+      ${prev ? '<p class="muted xs">Bài này đã có trong danh sách.</p>' : ''}
+      <p class="muted xs url-line">${esc(id)}</p>
+      <label for="art-title">Tiêu đề</label>
+      <input id="art-title" type="text" value="${esc(title || prev?.title || titleFromUrl(id))}" autocomplete="off">
+      <label for="art-tag-in">Tag</label>
+      <div class="tag-input">
+        <span class="chosen"></span>
+        <input id="art-tag-in" type="text" placeholder="Gõ tag rồi Enter, ví dụ tin-tuc" autocomplete="off" autocapitalize="off" enterkeyhint="done">
+      </div>
+      <div class="sugg" aria-label="Tag đã dùng"></div>
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" value="cancel" data-x="cancel">Huỷ</button>
+        <button type="submit" class="btn primary" value="save">Lưu</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dlg);
+  const tagIn = dlg.querySelector('#art-tag-in');
+  const draw = () => {
+    dlg.querySelector('.chosen').innerHTML = tags.map((t) => `<button type="button" class="tag on sm" data-rm="${esc(t)}" aria-label="Bỏ tag ${esc(t)}">${esc(t)} ×</button>`).join('');
+    const typed = normTag(tagIn.value);
+    const sugg = allTags.filter((t) => !tags.includes(t) && (!typed || t.includes(typed))).slice(0, 12);
+    dlg.querySelector('.sugg').innerHTML = sugg.map((t) => `<button type="button" class="tag sm" data-add="${esc(t)}">+ ${esc(t)}</button>`).join('');
+  };
+  const addTyped = () => {
+    for (const part of tagIn.value.split(',')) { const t = normTag(part); if (t && !tags.includes(t)) tags.push(t); }
+    tagIn.value = '';
+    draw();
+  };
+  tagIn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTyped(); }
+    else if (e.key === 'Backspace' && !tagIn.value && tags.length) { tags.pop(); draw(); }
+  });
+  tagIn.addEventListener('input', () => { if (tagIn.value.includes(',')) addTyped(); else draw(); });
+  dlg.addEventListener('click', (e) => {
+    const rm = e.target.closest('[data-rm]');
+    const add = e.target.closest('[data-add]');
+    if (rm) { tags = tags.filter((t) => t !== rm.dataset.rm); draw(); }
+    if (add) { tags.push(add.dataset.add); draw(); tagIn.focus(); }
+    if (e.target.closest('[data-x="cancel"]')) dlg.close('cancel');
+  });
+  dlg.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    addTyped();
+    try {
+      const { existed } = await upsertArticle({ url: id, title: dlg.querySelector('#art-title').value, tags });
+      S.articles = await loadArticles();
+      dlg.close('save');
+      toast(existed ? 'Đã cập nhật bài' : 'Đã lưu bài đã đọc');
+      const inp = app.querySelector('#art-url');
+      if (inp) inp.value = '';
+      if ((S.route || '').startsWith('#/articles')) renderArticles(); else location.hash = '#/articles';
+    } catch (err) { toast(err.message); }
+  });
+  dlg.addEventListener('close', () => dlg.remove());
+  draw();
+  dlg.showModal();
+  if (!prev) tagIn.focus();
 }
 
 // ---------------- Màn Cài đặt ----------------
@@ -704,6 +875,18 @@ async function onClick(e) {
   const a = el.dataset.action;
   const id = el.dataset.id;
   if (a === 'signin') return signIn();
+  if (a === 'art-add') return addFromInput();
+  if (a === 'art-tag') { S.artTag = S.artTag === el.dataset.tag ? '' : el.dataset.tag; return renderArticles(); }
+  if (a === 'art-edit') { const r = S.articles[id]; if (r) openArticleEditor({ url: r.url, title: r.title }); return; }
+  if (a === 'art-del') {
+    const before = await deleteArticle(id);
+    S.articles = await loadArticles();
+    renderArticles();
+    if (before) {
+      toast('Đã xoá bài', { label: 'Hoàn tác', fn: async () => { await restoreArticle(before); S.articles = await loadArticles(); if ((S.route || '').startsWith('#/articles')) renderArticles(); } });
+    }
+    return;
+  }
   if (a === 'refresh') return refresh({ force: true });
   if (a === 'dl') {
     const b = bookById(id);
@@ -761,6 +944,14 @@ async function onClick(e) {
     toast('Đã đăng xuất');
     location.hash = '#/';
     return renderView();
+  }
+}
+
+function onInput(e) {
+  if (e.target.id === 'art-q') {
+    S.artQuery = e.target.value;
+    const list = app.querySelector('#art-list');
+    if (list) list.innerHTML = artListHtml();
   }
 }
 

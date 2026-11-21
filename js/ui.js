@@ -18,6 +18,9 @@ const P = {
   wifi: '<path d="M2 9a15 15 0 0120 0"/><path d="M5.5 12.5a10 10 0 0113 0"/><path d="M9 16a5 5 0 016 0"/><path d="M12 19.5h.01"/>',
   chevron: '<path d="M6 9l6 6 6-6"/>',
   refresh: '<path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 5v6h-6"/>',
+  article: '<path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>',
+  tag: '<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="8.5" r="1.2"/>',
 };
 
 export function icon(name, size = 22) {
@@ -47,7 +50,8 @@ export function dayKey(ts) {
 }
 
 let toastTimer = null;
-export function toast(text) {
+// action: { label, fn } – ví dụ nút "Hoàn tác".
+export function toast(text, action) {
   let el = document.querySelector('.toast');
   if (!el) {
     el = document.createElement('div');
@@ -55,10 +59,21 @@ export function toast(text) {
     el.setAttribute('role', 'status');
     document.body.appendChild(el);
   }
-  el.textContent = text;
+  el.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = text;
+  el.appendChild(span);
+  if (action) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toast-btn';
+    b.textContent = action.label;
+    b.onclick = () => { el.classList.remove('show'); action.fn(); };
+    el.appendChild(b);
+  }
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
+  toastTimer = setTimeout(() => el.classList.remove('show'), action ? 6000 : 3200);
 }
 
 // Tách tên bộ & số tập: "Ninku2nd-V6.pdf" -> { series: "Ninku2nd", vol: 6 }

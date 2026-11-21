@@ -1,5 +1,5 @@
 export const CONFIG = {
-  version: '1.0.1',
+  version: '1.1.0',
   clientId: '878030336042-18q2nhn7ihp8i42galb3gljgtf45uib4.apps.googleusercontent.com',
   scopes: [
     'https://www.googleapis.com/auth/drive.readonly',
