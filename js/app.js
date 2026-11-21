@@ -14,6 +14,7 @@ import {
   loadArticles, upsertArticle, deleteArticle, restoreArticle, activeList, tagCounts,
   extractUrl, cleanUrl, titleFromUrl, normTag,
 } from './articles.js';
+import { computeStats, renderStatsHtml } from './stats.js';
 
 const app = document.getElementById('app');
 
@@ -38,6 +39,7 @@ const S = {
   articles: {},
   artTag: '',
   artQuery: '',
+  statsPeriod: 'month',
 };
 
 // ---------------- Khởi động ----------------
@@ -334,7 +336,7 @@ function renderView() {
   const h = S.route || '#/';
   if (h.startsWith('#/settings')) return renderSettings();
   if (h.startsWith('#/articles')) return renderArticles();
-  if (h.startsWith('#/stats')) return renderPlaceholder('stats');
+  if (h.startsWith('#/stats')) return renderStats();
   if (h.startsWith('#/hl')) return renderPlaceholder('hl');
   return renderLibrary();
 }
@@ -706,6 +708,37 @@ function openArticleEditor({ url, title }) {
   if (!prev) tagIn.focus();
 }
 
+// ---------------- Màn Thống kê ----------------
+function renderStats() {
+  const st = computeStats({
+    sessions: S.sessions, progress: S.progress, books: S.books, articles: S.articles, period: S.statsPeriod,
+  });
+  // Đang đọc: gom theo bộ, mới nhất ở trên.
+  const reading = S.books
+    .filter((b) => S.progress[b.id] && !isFinished(b.id))
+    .sort((a, b) => S.progress[b.id].updatedAt - S.progress[a.id].updatedAt);
+  const seen = new Set();
+  const rows = [];
+  for (const b of reading) {
+    const x = info(b);
+    const key = x.series ? `s:${b.genre}/${x.series}` : `b:${b.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (x.series) {
+      const vols = S.books.map(info).filter((o) => o.series === x.series && o.genre === b.genre).sort((m, n) => m.vol - n.vol);
+      const done = vols.filter((v) => isFinished(v.id)).length;
+      rows.push(`<div class="gbar"><div class="gbar-head"><span>${esc(x.series)}</span><span class="muted tnum">${done} / ${vols.length} tập</span></div>
+        <div class="segs" style="grid-template-columns:repeat(${vols.length},minmax(0,1fr))">${vols.map((v) => `<i class="${isFinished(v.id) ? 'done' : S.progress[v.id] ? 'cur' : ''}" title="Tập ${v.vol}"></i>`).join('')}</div></div>`);
+    } else {
+      const p = S.progress[b.id];
+      const pct = Math.round((p.last / p.total) * 100);
+      rows.push(`<div class="gbar"><div class="gbar-head"><span>${esc(x.title)}</span><span class="muted tnum">${pct}%</span></div>${bar(pct)}</div>`);
+    }
+    if (rows.length >= 6) break;
+  }
+  app.innerHTML = `<div class="page wide">${renderStatsHtml(st, { readingRows: rows.join('') })}${nav('stats')}</div>`;
+}
+
 // ---------------- Màn Cài đặt ----------------
 async function renderSettings() {
   const [usage, last] = await Promise.all([storageUsage(), lastSyncAt()]);
@@ -834,7 +867,9 @@ async function savePosition(b, pos) {
   if (pos.last !== pos.page) sessPage(pos.last);
   const prev = S.progress[b.id];
   const finished = pos.finished || Boolean(prev?.finished); // đã đọc xong thì giữ trạng thái xong
-  const rec = { page: pos.page, last: pos.last, total: pos.total, finished, updatedAt: Date.now(), name: b.name };
+  const now = Date.now();
+  const finishedAt = finished ? (prev?.finishedAt || (prev?.finished ? prev.updatedAt : now)) : null;
+  const rec = { page: pos.page, last: pos.last, total: pos.total, finished, finishedAt, updatedAt: now, name: b.name, genre: b.genre };
   S.progress[b.id] = rec;
   await db.set('progress', b.id, rec);
   scheduleSync(8000);
@@ -876,6 +911,7 @@ async function onClick(e) {
   const id = el.dataset.id;
   if (a === 'signin') return signIn();
   if (a === 'art-add') return addFromInput();
+  if (a === 'stats-period') { S.statsPeriod = el.dataset.period; return renderStats(); }
   if (a === 'art-tag') { S.artTag = S.artTag === el.dataset.tag ? '' : el.dataset.tag; return renderArticles(); }
   if (a === 'art-edit') { const r = S.articles[id]; if (r) openArticleEditor({ url: r.url, title: r.title }); return; }
   if (a === 'art-del') {
