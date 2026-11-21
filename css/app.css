@@ -247,3 +247,13 @@ dialog.sheet { max-height: 92dvh; overflow: auto; }
 .scan video { width: 100%; max-height: 50dvh; border-radius: 12px; background: #000; object-fit: cover; }
 .top-actions .btn span { margin-left: 2px; }
 @media (max-width: 420px) { .top-actions .btn span { display: none; } .top-actions .btn { width: 44px; padding: 0; } }
+
+.cover-pick { display: flex; gap: 12px; align-items: center; }
+.cover-pick-body { flex: 1; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.cover-pick .cover img, .pb-prev img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.two-col > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.two-col input { min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; width: 100%; }
+.two-col label { font-size: 13px; font-weight: 600; }
+.series-head .pill { flex-shrink: 0; }

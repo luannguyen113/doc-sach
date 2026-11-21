@@ -116,3 +116,25 @@ export async function writeAppState(fileId, data) {
   });
   return (await res.json()).id;
 }
+
+// ---- File ảnh (bìa sách giấy) trong appDataFolder ----
+export async function uploadAppDataFile(name, blob) {
+  const boundary = 'docsach' + Math.random().toString(36).slice(2);
+  const meta = JSON.stringify({ name, parents: ['appDataFolder'] });
+  const body = new Blob([
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${blob.type || 'image/jpeg'}\r\n\r\n`,
+    blob,
+    `\r\n--${boundary}--`,
+  ]);
+  const res = await authFetch(`${UPLOAD}/files?uploadType=multipart&fields=id`, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  return (await res.json()).id;
+}
+
+export async function downloadFileBlob(id) {
+  const res = await authFetch(`${API}/files/${id}?alt=media`);
+  return res.blob();
+}

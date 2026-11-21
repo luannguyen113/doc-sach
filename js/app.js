@@ -16,7 +16,7 @@ import {
 } from './articles.js';
 import { computeStats, renderStatsHtml } from './stats.js';
 import {
-  loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, normIsbn, lookupIsbn, canScan, scanIsbn,
+  loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, paperTitle, shrinkImage, readCoverText, saveCover, fetchCover,
 } from './paper.js';
 
 const app = document.getElementById('app');
@@ -62,6 +62,8 @@ async function boot() {
   ]);
   S.articles = articles;
   S.paper = await loadPaper();
+  const gas = await getPref('gasUrl');
+  if (gas && !S.settings.gasUrl) S.settings.gasUrl = gas;
   if (settings) S.settings = { ...S.settings, ...settings };
   if (lib) { S.books = lib.books || []; S.scannedAt = lib.scannedAt || 0; }
   S.progress = Object.fromEntries(progressEntries);
@@ -117,6 +119,7 @@ async function refresh({ force = false } = {}) {
   }
   runPolicy();
   renderView();
+  uploadPendingCovers().catch(() => {});
 }
 
 function handleErr(e) {
@@ -130,6 +133,8 @@ async function reloadFromDb() {
   S.sessions = s;
   S.articles = a;
   S.paper = await loadPaper();
+  const gas = await getPref('gasUrl');
+  if (gas) S.settings.gasUrl = gas;
   runPolicy();
   if (!S.reader) renderView();
 }
@@ -428,7 +433,7 @@ function renderLibrary() {
   }
 
   const contPdf = continueBook();
-  const contPaper = activePaper(S.paper).filter((b) => b.status === 'reading').sort((a, b) => (b.lastReadAt || b.updatedAt) - (a.lastReadAt || a.updatedAt))[0];
+  const contPaper = activePaper(S.paper).filter((b) => b.status === 'reading' && b.lastReadAt).sort((a, b) => (b.lastReadAt || b.updatedAt) - (a.lastReadAt || a.updatedAt))[0];
   const pdfTs = contPdf ? (S.progress[contPdf.id]?.updatedAt || 0) : 0;
   const usePaper = contPaper && (contPaper.lastReadAt || contPaper.updatedAt) > pdfTs;
   const cont = usePaper ? null : contPdf;
@@ -458,15 +463,21 @@ function renderLibrary() {
   }
   for (const pb of activePaper(S.paper)) {
     if (!genres.has(pb.genre)) genres.set(pb.genre, new Map());
-    genres.get(pb.genre).set(pb.id, { paper: pb, items: [] });
+    const gm = genres.get(pb.genre);
+    if (pb.series) {
+      const k = `ps:${pb.series}`;
+      if (!gm.has(k)) gm.set(k, { paperSeries: pb.series, papers: [], items: [] });
+      gm.get(k).papers.push(pb);
+    } else gm.set(pb.id, { paper: pb, items: [] });
   }
-  const recency = (items, g) => (g?.paper ? (g.paper.lastReadAt || g.paper.updatedAt) : Math.max(0, ...items.map((i) => S.progress[i.id]?.updatedAt || 0)));
+  const pts = (p) => p.lastReadAt || p.updatedAt || 0;
+  const recency = (items, g) => (g?.paper ? pts(g.paper) : g?.papers ? Math.max(...g.papers.map(pts)) : Math.max(0, ...items.map((i) => S.progress[i.id]?.updatedAt || 0)));
   const genreHtml = [...genres.entries()]
     .sort((a, b) => (a[0] === 'Khác') - (b[0] === 'Khác') || a[0].localeCompare(b[0], 'vi'))
     .map(([genre, groups]) => {
       const rows = [...groups.values()]
         .sort((a, b) => recency(b.items, b) - recency(a.items, a) || groupName(a).localeCompare(groupName(b), 'vi'))
-        .map((g) => (g.paper ? paperRow(g.paper) : g.series && g.items.length > 1 ? seriesCard(g) : bookRow(g.items[0]))).join('');
+        .map((g) => (g.paper ? paperRow(g.paper) : g.papers ? paperSeriesCard(g) : g.series && g.items.length > 1 ? seriesCard(g) : bookRow(g.items[0]))).join('');
       return `<section aria-label="${esc(genre)}"><h2 class="h2">${esc(genre)}</h2><div class="list">${rows}</div></section>`;
     }).join('');
 
@@ -509,28 +520,75 @@ function syncLine() {
   return parts.join(' · ') || 'Google Drive';
 }
 
-const groupName = (g) => (g.paper ? g.paper.title : g.series || g.items[0].title);
+const groupName = (g) => (g.paper ? g.paper.title : g.paperSeries || g.series || g.items[0].title);
 
 // ---------------- Sách giấy ----------------
 const PAPER_STATUS = { reading: 'Đang đọc', done: 'Đã đọc xong', dropped: 'Bỏ dở' };
 const paperPct = (b) => (b.totalPages ? Math.min(100, Math.round(((b.page || 0) / b.totalPages) * 100)) : 0);
 
 function paperCover(b, cls) {
+  const local = S.covers.get(b.id);
+  if (local) return `<img class="${cls}" src="${local}" alt="" loading="lazy">`;
+  if (b.coverFileId && !S.coverLoading?.has(b.id)) loadPaperCover(b);
   if (b.cover && netType() !== 'offline') return `<span class="${cls} ph"><img src="${esc(b.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"><span>${icon('book', 18)}</span></span>`;
   return `<span class="${cls} ph"><span>${icon('book', 18)}</span></span>`;
 }
 
-function paperRow(b) {
+// Ảnh bìa chụp trên máy khác: tải từ thư mục ẩn của Drive về một lần rồi lưu lại.
+async function loadPaperCover(b) {
+  S.coverLoading ||= new Set();
+  if (netType() === 'offline' || !(await auth.getToken())) return;
+  S.coverLoading.add(b.id);
+  try {
+    const blob = await fetchCover(b.id, b.coverFileId);
+    S.covers.set(b.id, URL.createObjectURL(blob));
+    if (!S.reader) renderView();
+  } catch { /* để lần sau */ }
+}
+
+// Bìa chụp lúc offline: tải lên Drive khi có mạng.
+async function uploadPendingCovers() {
+  if (netType() === 'offline' || !(await auth.getToken())) return;
+  for (const b of activePaper(S.paper)) {
+    if (b.coverFileId || !b.hasCover) continue;
+    const blob = await db.get('covers', b.id);
+    if (!blob) continue;
+    const fid = await saveCover(b.id, blob);
+    if (fid) S.paper[b.id] = await savePaperBook({ ...S.paper[b.id], coverFileId: fid });
+  }
+}
+
+function paperSeriesCard(g) {
+  const vols = g.papers.slice().sort((a, b) => (a.volume || 0) - (b.volume || 0));
+  const done = vols.filter((v) => v.status === 'done').length;
+  const key = `paper/${vols[0].genre}/${g.paperSeries}`;
+  const open = S.expanded.has(key);
+  const cur = vols.filter((v) => v.status === 'reading' && v.page).sort((a, b) => pts(b) - pts(a))[0]
+    || vols.find((v) => v.status === 'reading');
+  return `<div class="card series">
+    <button type="button" class="series-head" data-action="toggle" data-key="${esc(key)}" aria-expanded="${open}">
+      <span class="t">${esc(g.paperSeries)}</span><span class="pill">Sách giấy</span>
+      <span class="muted sm tnum">${done} / ${vols.length} tập xong</span>
+      ${icon('chevron', 18)}
+    </button>
+    <div class="segs" style="grid-template-columns:repeat(${vols.length},minmax(0,1fr))">${vols.map((v) => `<i class="${v.status === 'done' ? 'done' : v.status === 'reading' && v.page ? 'cur' : ''}" title="Tập ${v.volume || '?'}"></i>`).join('')}</div>
+    ${!open && cur ? `<div class="row-end"><span class="muted sm">${cur.page ? `Đang đọc: Tập ${cur.volume || '?'} · trang ${cur.page}/${cur.totalPages}` : `Tiếp theo: Tập ${cur.volume || '?'}`}</span><a class="btn ghost sm" href="#/paper/${encodeURIComponent(cur.id)}">Mở</a></div>` : ''}
+    ${open ? `<div class="vols">${vols.map((v) => paperRow(v, true)).join('')}</div>` : ''}
+  </div>`;
+}
+const pts = (p) => p.lastReadAt || p.updatedAt || 0;
+
+function paperRow(b, inSeries) {
   const pct = paperPct(b);
-  const st = b.status === 'reading' ? `Trang ${b.page || 0} / ${b.totalPages} · ${pct}%` : PAPER_STATUS[b.status];
+  const st = b.status === 'reading' ? (b.page ? `Trang ${b.page} / ${b.totalPages} · ${pct}%` : `Chưa đọc · ${b.totalPages} trang`) : PAPER_STATUS[b.status];
   return `<div class="row">
     <a class="row-link" href="#/paper/${encodeURIComponent(b.id)}">
       ${paperCover(b, 'cover sm')}
-      <span class="row-text"><span class="t">${esc(b.title)}</span>
-      <span class="muted sm tnum">${esc(st)}${b.author ? ` · ${esc(b.author)}` : ''}</span>
-      ${b.status === 'reading' ? bar(pct) : ''}</span>
+      <span class="row-text"><span class="t">${esc(inSeries ? `Tập ${b.volume || '?'}` : paperTitle(b))}</span>
+      <span class="muted sm tnum">${esc(st)}${b.author && !inSeries ? ` · ${esc(b.author)}` : ''}</span>
+      ${b.status === 'reading' && b.page ? bar(pct) : ''}</span>
     </a>
-    <span class="badges"><span class="pill">Sách giấy</span></span>
+    ${inSeries ? '' : '<span class="badges"><span class="pill">Sách giấy</span></span>'}
   </div>`;
 }
 
@@ -538,9 +596,9 @@ function paperContinueCard(b) {
   const pct = paperPct(b);
   return `<section aria-label="Đọc tiếp"><h2 class="h2">Đọc tiếp</h2>
     <div class="card cont">
-      <a href="#/paper/${encodeURIComponent(b.id)}" class="cont-link" aria-label="${esc(b.title)}">${paperCover(b, 'cover lg')}</a>
+      <a href="#/paper/${encodeURIComponent(b.id)}" class="cont-link" aria-label="${esc(paperTitle(b))}">${paperCover(b, 'cover lg')}</a>
       <div class="cont-body">
-        <strong class="t">${esc(b.title)}</strong>
+        <strong class="t">${esc(paperTitle(b))}</strong>
         <span class="muted sm tnum">Trang ${b.page || 0} / ${b.totalPages} · ${pct}% · ${esc(b.genre)}</span>
         ${bar(pct)}
         <div class="row-end"><span class="pill">Sách giấy</span><button type="button" class="btn primary" data-action="paper-log" data-id="${esc(b.id)}">Ghi lần đọc</button></div>
@@ -576,8 +634,9 @@ function renderPaperDetail(id) {
         <section class="card cont">
           ${paperCover(b, 'cover lg')}
           <div class="cont-body">
-            <h1 class="pb-title">${esc(b.title)}</h1>
+            <h1 class="pb-title">${esc(paperTitle(b))}</h1>
             <span class="muted sm">${esc(b.author || 'Chưa có tác giả')} · ${esc(b.genre)} · ${b.totalPages} trang</span>
+            ${b.translator || b.publisher ? `<span class="muted xs">${[b.translator ? `${esc(b.translator)} dịch` : '', esc(b.publisher || '')].filter(Boolean).join(' · ')}</span>` : ''}
             <span class="sm"><strong>${PAPER_STATUS[b.status]}</strong> · <span class="tnum">trang ${b.page || 0} / ${b.totalPages} · ${pct}%</span></span>
             ${bar(pct)}
           </div>
@@ -590,6 +649,7 @@ function renderPaperDetail(id) {
         </section>
         <div class="pb-actions">
           <button type="button" class="btn primary" data-action="paper-log" data-id="${esc(id)}">Ghi lần đọc</button>
+          ${b.series ? `<button type="button" class="btn ghost" data-action="paper-next-vol" data-id="${esc(id)}">${icon('plus', 18)}Thêm tập ${(b.volume || 0) + 1}</button>` : ''}
           ${b.status === 'dropped'
     ? `<button type="button" class="btn ghost" data-action="paper-status" data-id="${esc(id)}" data-status="reading">Đọc tiếp</button>`
     : b.status === 'reading' ? `<button type="button" class="btn ghost" data-action="paper-status" data-id="${esc(id)}" data-status="dropped">Bỏ dở</button>` : ''}
@@ -624,28 +684,49 @@ function allGenres() {
   return [...new Set([...S.books.map((b) => b.genre), ...activePaper(S.paper).map((b) => b.genre)])].filter(Boolean).sort((a, b) => a.localeCompare(b, 'vi'));
 }
 
-function openPaperEditor(rec) {
+// rec: sách đang sửa; preset: điền sẵn khi thêm tập mới của một bộ.
+function openPaperEditor(rec, preset) {
   const isNew = !rec;
-  const b = rec || { title: '', author: '', genre: allGenres()[0] || '', totalPages: '', isbn: '', cover: null, status: 'reading', page: 0, startedAt: Date.now() };
+  const b = rec || {
+    title: '', series: '', volume: '', author: '', translator: '', publisher: '',
+    genre: allGenres()[0] || '', totalPages: '', status: 'reading', page: 0, startedAt: Date.now(), ...(preset || {}),
+  };
   const genres = allGenres();
+  if (b.genre && !genres.includes(b.genre)) genres.unshift(b.genre);
+  let coverBlob = null;
   document.querySelector('dialog.sheet')?.remove();
   const dlg = document.createElement('dialog');
   dlg.className = 'sheet';
   dlg.setAttribute('aria-label', isNew ? 'Thêm sách giấy' : 'Sửa sách giấy');
+  const curCover = S.covers.get(b.id || '') || '';
   dlg.innerHTML = `
     <form class="sheet-body" novalidate>
       <h2 class="sheet-title">${isNew ? 'Thêm sách giấy' : 'Sửa thông tin sách'}</h2>
-      <label for="pb-isbn">ISBN (mã vạch sau bìa) – không bắt buộc</label>
-      <div class="inline">
-        <input id="pb-isbn" type="text" inputmode="numeric" value="${esc(b.isbn || '')}" autocomplete="off" placeholder="978…">
-        ${canScan() ? `<button type="button" class="btn ghost" data-x="scan">${icon('scan', 18)}Quét</button>` : ''}
-        <button type="button" class="btn ghost" data-x="lookup">Tra</button>
+      <div class="cover-pick">
+        <span class="cover lg ph pb-prev">${curCover ? `<img src="${curCover}" alt="">` : icon('book', 22)}</span>
+        <div class="cover-pick-body">
+          <label class="btn ghost" for="pb-photo">${icon('scan', 18)}${curCover ? 'Chụp lại bìa' : 'Chụp / chọn ảnh bìa'}</label>
+          <input id="pb-photo" type="file" accept="image/*" class="visually-hidden">
+          <p class="muted xs pb-hint" role="status">App đọc tên sách, tác giả, số tập từ ảnh bìa. Số trang anh nhập tay.</p>
+        </div>
       </div>
-      <p class="muted xs pb-hint" role="status"></p>
       <label for="pb-title">Tên sách *</label>
-      <input id="pb-title" type="text" value="${esc(b.title)}" autocomplete="off" required>
+      <input id="pb-title" type="text" value="${esc(b.title)}" autocomplete="off">
+      <div class="two-col">
+        <div><label for="pb-series">Tên bộ (truyện nhiều tập)</label>
+          <input id="pb-series" type="text" value="${esc(b.series || '')}" autocomplete="off" list="pb-series-list">
+          <datalist id="pb-series-list">${[...new Set(activePaper(S.paper).map((x) => x.series).filter(Boolean))].map((x) => `<option value="${esc(x)}">`).join('')}</datalist></div>
+        <div><label for="pb-vol">Tập số</label>
+          <input id="pb-vol" type="number" inputmode="numeric" min="1" value="${esc(b.volume || '')}"></div>
+      </div>
       <label for="pb-author">Tác giả</label>
       <input id="pb-author" type="text" value="${esc(b.author || '')}" autocomplete="off">
+      <div class="two-col">
+        <div><label for="pb-trans">Người dịch</label>
+          <input id="pb-trans" type="text" value="${esc(b.translator || '')}" autocomplete="off"></div>
+        <div><label for="pb-pub">Nhà xuất bản</label>
+          <input id="pb-pub" type="text" value="${esc(b.publisher || '')}" autocomplete="off"></div>
+      </div>
       <label for="pb-genre">Thể loại *</label>
       <select id="pb-genre">
         ${genres.map((g) => `<option ${g === b.genre ? 'selected' : ''}>${esc(g)}</option>`).join('')}
@@ -670,61 +751,91 @@ function openPaperEditor(rec) {
   document.body.appendChild(dlg);
   const $ = (q) => dlg.querySelector(q);
   const hint = $('.pb-hint');
-  const fill = (info) => {
-    if (info.title) $('#pb-title').value = info.title;
-    if (info.author) $('#pb-author').value = info.author;
-    if (info.totalPages) $('#pb-pages').value = info.totalPages;
-    b.cover = info.cover || b.cover;
+
+  // Truyện nhiều tập: lấy sẵn số trang, tác giả, thể loại từ tập gần nhất của cùng bộ.
+  const fillFromSeries = () => {
+    const name = $('#pb-series').value.trim();
+    if (!name) return;
+    const prev = activePaper(S.paper).filter((x) => x.series === name && x.id !== b.id).sort((x, y) => (y.volume || 0) - (x.volume || 0))[0];
+    if (!prev) return;
+    if (!$('#pb-pages').value) $('#pb-pages').value = prev.totalPages;
+    if (!$('#pb-author').value) $('#pb-author').value = prev.author || '';
+    if (!$('#pb-trans').value) $('#pb-trans').value = prev.translator || '';
+    if (!$('#pb-pub').value) $('#pb-pub').value = prev.publisher || '';
+    if (!$('#pb-vol').value && prev.volume) $('#pb-vol').value = prev.volume + 1;
+    if ([...$('#pb-genre').options].some((o) => o.value === prev.genre)) { $('#pb-genre').value = prev.genre; $('#pb-genre-new').hidden = true; }
   };
-  const lookup = async (raw) => {
-    const isbn = normIsbn(raw);
-    if (!isbn) { hint.textContent = 'ISBN phải có 10 hoặc 13 chữ số.'; return; }
-    $('#pb-isbn').value = isbn;
-    hint.textContent = 'Đang tra cứu…';
-    const info = await lookupIsbn(isbn);
-    if (info) { fill(info); hint.textContent = `Đã điền từ dữ liệu sách. Kiểm tra lại${info.totalPages ? '' : ', nhập số trang'} nhé.`; }
-    else hint.textContent = 'Không tìm thấy trên Google Books / Open Library – nhập tay giúp em.';
-  };
-  $('#pb-genre').addEventListener('change', () => { $('#pb-genre-new').hidden = $('#pb-genre').value !== '__new'; });
-  dlg.addEventListener('click', async (e) => {
-    const x = e.target.closest('[data-x]')?.dataset.x;
-    if (x === 'cancel') dlg.close();
-    if (x === 'lookup') lookup($('#pb-isbn').value);
-    if (x === 'scan') {
-      try { const code = await scanIsbn(); if (code) lookup(code); } catch { hint.textContent = 'Không mở được camera. Gõ ISBN rồi bấm Tra.'; }
-    }
+  $('#pb-series').addEventListener('change', fillFromSeries);
+
+  $('#pb-photo').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      coverBlob = await shrinkImage(file, 480, 0.8);
+      $('.pb-prev').innerHTML = `<img src="${URL.createObjectURL(coverBlob)}" alt="">`;
+    } catch { hint.textContent = 'Không đọc được ảnh này, thử ảnh khác.'; return; }
+    if (netType() === 'offline') { hint.textContent = 'Đang offline: đã lưu ảnh bìa, anh nhập thông tin bằng tay.'; return; }
+    hint.textContent = 'Đang đọc ảnh bìa…';
+    try {
+      const big = await shrinkImage(file, 1280, 0.85);
+      const info = await readCoverText(S.settings.gasUrl, big);
+      const set = (sel, v) => { if (v != null && v !== '') $(sel).value = v; };
+      set('#pb-title', info.title);
+      set('#pb-series', info.series || (info.volume ? info.title : ''));
+      set('#pb-vol', info.volume);
+      set('#pb-author', info.author);
+      set('#pb-trans', info.translator);
+      set('#pb-pub', info.publisher);
+      fillFromSeries();
+      hint.textContent = info.title ? 'Đã điền từ ảnh bìa. Kiểm tra lại và nhập số trang.' : 'Không đọc được chữ trên bìa, anh nhập tay giúp em.';
+    } catch (err) { hint.textContent = err.message; }
   });
+  $('#pb-genre').addEventListener('change', () => { $('#pb-genre-new').hidden = $('#pb-genre').value !== '__new'; });
+  dlg.addEventListener('click', (e) => { if (e.target.closest('[data-x="cancel"]')) dlg.close(); });
   $('form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const err = $('.form-err');
     const title = $('#pb-title').value.trim();
     const genre = $('#pb-genre').value === '__new' ? $('#pb-genre-new').value.trim() : $('#pb-genre').value;
     const totalPages = parseInt($('#pb-pages').value, 10);
+    const volume = parseInt($('#pb-vol').value, 10) || null;
+    const series = $('#pb-series').value.trim() || null;
     if (!title) { err.textContent = 'Nhập tên sách.'; return; }
     if (!genre) { err.textContent = 'Chọn hoặc nhập thể loại.'; return; }
     if (!(totalPages > 0)) { err.textContent = 'Nhập tổng số trang (số lớn hơn 0).'; return; }
+    if (series && !volume) { err.textContent = 'Truyện nhiều tập: nhập số tập.'; return; }
     const next = {
       ...b,
       id: b.id || newPaperId(),
-      title, genre, totalPages,
+      title, series, volume, genre, totalPages,
       author: $('#pb-author').value.trim(),
-      isbn: normIsbn($('#pb-isbn').value) || '',
+      translator: $('#pb-trans').value.trim(),
+      publisher: $('#pb-pub').value.trim(),
       startedAt: $('#pb-start').value ? fromDateInput($('#pb-start').value) : b.startedAt,
     };
+    delete next.isbn;
     if (!isNew) {
       next.status = $('#pb-status').value;
       const endV = $('#pb-end').value;
       next.finishedAt = next.status === 'done' ? (endV ? fromDateInput(endV) : (b.finishedAt || Date.now())) : null;
       if (next.status === 'done' && (next.page || 0) < totalPages) next.page = totalPages;
     }
+    if (coverBlob) {
+      next.hasCover = true;
+      next.coverFileId = null;
+      S.covers.set(next.id, URL.createObjectURL(coverBlob));
+    }
     S.paper[next.id] = await savePaperBook(next);
     dlg.close();
     toast(isNew ? 'Đã thêm sách giấy' : 'Đã lưu');
     if (isNew) location.hash = `#/paper/${encodeURIComponent(next.id)}`; else renderView();
+    if (coverBlob) {
+      const fid = await saveCover(next.id, coverBlob);
+      if (fid) S.paper[next.id] = await savePaperBook({ ...S.paper[next.id], coverFileId: fid });
+    }
   });
   dlg.addEventListener('close', () => dlg.remove());
   dlg.showModal();
-  if (isNew) $('#pb-isbn').focus();
 }
 
 function openLogDialog(id) {
@@ -763,7 +874,7 @@ function openLogDialog(id) {
     const end = $('#lg-date').value ? fromDateInput($('#lg-date').value) : Date.now();
     const fromPage = b.page || 0;
     const rec = {
-      id: crypto.randomUUID(), kind: 'paper', bookId: b.id, title: b.title, genre: b.genre,
+      id: crypto.randomUUID(), kind: 'paper', bookId: b.id, title: paperTitle(b), genre: b.genre, series: b.series || null, vol: b.volume || null,
       start: end - minutes * 60_000, end, rev: Date.now(), activeSec: minutes * 60,
       pages: Math.max(0, toPage - fromPage), fromPage, toPage, device: 'Sách giấy',
     };
@@ -1033,7 +1144,7 @@ function renderStats() {
   for (const pb of activePaper(S.paper).filter((x) => x.status === 'reading').sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0))) {
     if (rows.length >= 8) break;
     const pct = paperPct(pb);
-    rows.push(`<div class="gbar"><div class="gbar-head"><span>${esc(pb.title)} <span class="pill">Sách giấy</span></span><span class="muted tnum">${pct}%</span></div>${bar(pct)}</div>`);
+    rows.push(`<div class="gbar"><div class="gbar-head"><span>${esc(paperTitle(pb))} <span class="pill">Sách giấy</span></span><span class="muted tnum">${pct}%</span></div>${bar(pct)}</div>`);
   }
   app.innerHTML = `<div class="page wide">${renderStatsHtml(st, { readingRows: rows.join('') })}${nav('stats')}</div>`;
 }
@@ -1052,6 +1163,11 @@ async function renderSettings() {
           <label for="root">Thư mục sách trên Google Drive</label>
           <div class="inline"><input id="root" type="text" value="${esc(S.settings.rootFolder)}" autocomplete="off"><button type="button" class="btn" data-action="save-root">Lưu & quét lại</button></div>
           <p class="muted xs">Mỗi thư mục con là một thể loại, ví dụ “${esc(S.settings.rootFolder)}/Truyện tranh”.</p>
+        </section>
+        <section class="card form">
+          <label for="gas-url">Địa chỉ Apps Script đọc ảnh bìa (sách giấy)</label>
+          <div class="inline"><input id="gas-url" type="url" value="${esc(S.settings.gasUrl || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"><button type="button" class="btn" data-action="save-gas">Lưu</button></div>
+          <p class="muted xs">Dán địa chỉ web app sau khi Deploy. Chỉ cần nhập trên một máy, các máy khác tự đồng bộ.</p>
         </section>
         <section class="card form">
           <label class="switch-row"><span><strong>Cho phép tải offline bằng 4G</strong><br><span class="muted xs">Tắt: dùng 4G thì app hỏi trước khi tải. Wi-Fi luôn tự tải.</span></span><input type="checkbox" data-setting="allowCellular" ${S.settings.allowCellular ? 'checked' : ''}></label>
@@ -1212,6 +1328,11 @@ async function onClick(e) {
   if (a === 'art-add') return addFromInput();
   if (a === 'paper-new') return openPaperEditor(null);
   if (a === 'paper-edit') return openPaperEditor(S.paper[id]);
+  if (a === 'paper-next-vol') {
+    const p = S.paper[id];
+    if (p) openPaperEditor(null, { title: p.title, series: p.series, volume: (p.volume || 0) + 1, author: p.author, translator: p.translator, publisher: p.publisher, genre: p.genre, totalPages: p.totalPages });
+    return;
+  }
   if (a === 'paper-log') return openLogDialog(id);
   if (a === 'paper-status') {
     const b = S.paper[id];
@@ -1288,6 +1409,15 @@ async function onClick(e) {
     await saveSettings();
     location.hash = '#/';
     return refresh({ force: true });
+  }
+  if (a === 'save-gas') {
+    const v = app.querySelector('#gas-url').value.trim();
+    if (v && !/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(v)) { toast('Địa chỉ phải có dạng https://script.google.com/macros/s/…/exec'); return; }
+    S.settings.gasUrl = v;
+    await saveSettings();
+    await setPref('gasUrl', v);
+    toast('Đã lưu địa chỉ Apps Script');
+    return;
   }
   if (a === 'unallow') {
     S.settings.cellularSeries = S.settings.cellularSeries.filter((s) => s !== el.dataset.series);
