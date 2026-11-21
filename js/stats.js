@@ -33,7 +33,7 @@ function sumWindow(sessions, a, b) {
   return { list, minutes: sec / 60, count: list.length, pages: list.reduce((x, s) => x + (s.pages || 0), 0) };
 }
 
-export function computeStats({ sessions, progress, books, articles, period, now = new Date() }) {
+export function computeStats({ sessions, progress, books, articles, paper = {}, period, now = new Date() }) {
   const ss = sessions.filter(valid);
   const r = periodRange(period, now);
   const cur = sumWindow(ss, r.start, r.end + 1);
@@ -75,6 +75,12 @@ export function computeStats({ sessions, progress, books, articles, period, now 
     if (!inRange(t, r.start, r.end + 1)) continue;
     completed += 1;
     g(p.genre || bookById.get(id)?.genre || 'Khác').done += 1;
+  }
+  for (const p of Object.values(paper)) {
+    if (p.deleted || p.status !== 'done' || !p.finishedAt) continue;
+    if (!inRange(p.finishedAt, r.start, r.end + 1)) continue;
+    completed += 1;
+    g(p.genre || 'Khác').done += 1;
   }
   const genreList = [...genres.values()].sort((a, b) => b.minutes - a.minutes);
 

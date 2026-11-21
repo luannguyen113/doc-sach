@@ -15,6 +15,9 @@ import {
   extractUrl, cleanUrl, titleFromUrl, normTag,
 } from './articles.js';
 import { computeStats, renderStatsHtml } from './stats.js';
+import {
+  loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, normIsbn, lookupIsbn, canScan, scanIsbn,
+} from './paper.js';
 
 const app = document.getElementById('app');
 
@@ -40,6 +43,7 @@ const S = {
   artTag: '',
   artQuery: '',
   statsPeriod: 'month',
+  paper: {},
 };
 
 // ---------------- Khởi động ----------------
@@ -57,6 +61,7 @@ async function boot() {
     db.get('kv', 'settings'), db.get('kv', 'library'), db.entries('progress'), db.all('sessions'), localIds(), loadArticles(),
   ]);
   S.articles = articles;
+  S.paper = await loadPaper();
   if (settings) S.settings = { ...S.settings, ...settings };
   if (lib) { S.books = lib.books || []; S.scannedAt = lib.scannedAt || 0; }
   S.progress = Object.fromEntries(progressEntries);
@@ -124,6 +129,7 @@ async function reloadFromDb() {
   S.progress = Object.fromEntries(p);
   S.sessions = s;
   S.articles = a;
+  S.paper = await loadPaper();
   runPolicy();
   if (!S.reader) renderView();
 }
@@ -325,6 +331,8 @@ function streakInfo() {
 function route() {
   const h = location.hash || '#/';
   const m = h.match(/^#\/read\/(.+)$/);
+  const pm = h.match(/^#\/paper\/(.+)$/);
+  if (pm) { if (S.reader) closeReader(); S.route = h; renderPaperDetail(decodeURIComponent(pm[1])); return; }
   if (S.reader && !m) closeReader();
   if (m) { openBook(decodeURIComponent(m[1])); return; }
   S.route = h;
@@ -336,6 +344,8 @@ function renderView() {
   const h = S.route || '#/';
   if (h.startsWith('#/settings')) return renderSettings();
   if (h.startsWith('#/articles')) return renderArticles();
+  const pm = h.match(/^#\/paper\/(.+)$/);
+  if (pm) return renderPaperDetail(decodeURIComponent(pm[1]));
   if (h.startsWith('#/stats')) return renderStats();
   if (h.startsWith('#/hl')) return renderPlaceholder('hl');
   return renderLibrary();
@@ -417,8 +427,12 @@ function renderLibrary() {
       </div></div>`);
   }
 
-  const cont = continueBook();
-  const contHtml = cont ? (() => {
+  const contPdf = continueBook();
+  const contPaper = activePaper(S.paper).filter((b) => b.status === 'reading').sort((a, b) => (b.lastReadAt || b.updatedAt) - (a.lastReadAt || a.updatedAt))[0];
+  const pdfTs = contPdf ? (S.progress[contPdf.id]?.updatedAt || 0) : 0;
+  const usePaper = contPaper && (contPaper.lastReadAt || contPaper.updatedAt) > pdfTs;
+  const cont = usePaper ? null : contPdf;
+  const contHtml = usePaper ? paperContinueCard(contPaper) : cont ? (() => {
     const p = S.progress[cont.id];
     const pct = p ? Math.round((p.last / p.total) * 100) : 0;
     return `<section aria-label="Đọc tiếp"><h2 class="h2">Đọc tiếp</h2>
@@ -442,17 +456,21 @@ function renderLibrary() {
     if (!g.has(k)) g.set(k, { series: x.series, items: [] });
     g.get(k).items.push({ ...b, ...x });
   }
-  const recency = (items) => Math.max(0, ...items.map((i) => S.progress[i.id]?.updatedAt || 0));
+  for (const pb of activePaper(S.paper)) {
+    if (!genres.has(pb.genre)) genres.set(pb.genre, new Map());
+    genres.get(pb.genre).set(pb.id, { paper: pb, items: [] });
+  }
+  const recency = (items, g) => (g?.paper ? (g.paper.lastReadAt || g.paper.updatedAt) : Math.max(0, ...items.map((i) => S.progress[i.id]?.updatedAt || 0)));
   const genreHtml = [...genres.entries()]
     .sort((a, b) => (a[0] === 'Khác') - (b[0] === 'Khác') || a[0].localeCompare(b[0], 'vi'))
     .map(([genre, groups]) => {
       const rows = [...groups.values()]
-        .sort((a, b) => recency(b.items) - recency(a.items) || (a.series || a.items[0].title).localeCompare(b.series || b.items[0].title, 'vi'))
-        .map((g) => (g.series && g.items.length > 1 ? seriesCard(g) : bookRow(g.items[0]))).join('');
+        .sort((a, b) => recency(b.items, b) - recency(a.items, a) || groupName(a).localeCompare(groupName(b), 'vi'))
+        .map((g) => (g.paper ? paperRow(g.paper) : g.series && g.items.length > 1 ? seriesCard(g) : bookRow(g.items[0]))).join('');
       return `<section aria-label="${esc(genre)}"><h2 class="h2">${esc(genre)}</h2><div class="list">${rows}</div></section>`;
     }).join('');
 
-  const empty = !S.books.length && !S.scanning && !S.libError && !S.needAuth
+  const empty = !S.books.length && !activePaper(S.paper).length && !S.scanning && !S.libError && !S.needAuth
     ? `<div class="card empty"><p>Chưa có sách. Hãy chép file PDF vào <strong>${esc(S.settings.rootFolder)}/&lt;Thể loại&gt;/</strong> trên Google Drive rồi kéo xuống để làm mới.</p><button type="button" class="btn" data-action="refresh">Quét lại</button></div>` : '';
 
   app.innerHTML = `
@@ -460,6 +478,7 @@ function renderLibrary() {
       <header class="top">
         <div><h1>Thư viện</h1><span class="muted sm">${S.scanning ? 'Đang quét Google Drive…' : syncLine()}</span></div>
         <div class="top-actions">
+          <button type="button" class="btn ghost" data-action="paper-new" aria-label="Thêm sách giấy">${icon('plus', 18)}<span>Sách giấy</span></button>
           <button type="button" class="icon-btn" data-action="refresh" aria-label="Làm mới">${icon('refresh')}</button>
           <a class="icon-btn" href="#/settings" aria-label="Cài đặt">${icon('gear')}</a>
         </div>
@@ -488,6 +507,281 @@ function syncLine() {
   const parts = [];
   if (S.scannedAt) parts.push(`Quét Drive ${fmtTime(S.scannedAt)}`);
   return parts.join(' · ') || 'Google Drive';
+}
+
+const groupName = (g) => (g.paper ? g.paper.title : g.series || g.items[0].title);
+
+// ---------------- Sách giấy ----------------
+const PAPER_STATUS = { reading: 'Đang đọc', done: 'Đã đọc xong', dropped: 'Bỏ dở' };
+const paperPct = (b) => (b.totalPages ? Math.min(100, Math.round(((b.page || 0) / b.totalPages) * 100)) : 0);
+
+function paperCover(b, cls) {
+  if (b.cover && netType() !== 'offline') return `<span class="${cls} ph"><img src="${esc(b.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()"><span>${icon('book', 18)}</span></span>`;
+  return `<span class="${cls} ph"><span>${icon('book', 18)}</span></span>`;
+}
+
+function paperRow(b) {
+  const pct = paperPct(b);
+  const st = b.status === 'reading' ? `Trang ${b.page || 0} / ${b.totalPages} · ${pct}%` : PAPER_STATUS[b.status];
+  return `<div class="row">
+    <a class="row-link" href="#/paper/${encodeURIComponent(b.id)}">
+      ${paperCover(b, 'cover sm')}
+      <span class="row-text"><span class="t">${esc(b.title)}</span>
+      <span class="muted sm tnum">${esc(st)}${b.author ? ` · ${esc(b.author)}` : ''}</span>
+      ${b.status === 'reading' ? bar(pct) : ''}</span>
+    </a>
+    <span class="badges"><span class="pill">Sách giấy</span></span>
+  </div>`;
+}
+
+function paperContinueCard(b) {
+  const pct = paperPct(b);
+  return `<section aria-label="Đọc tiếp"><h2 class="h2">Đọc tiếp</h2>
+    <div class="card cont">
+      <a href="#/paper/${encodeURIComponent(b.id)}" class="cont-link" aria-label="${esc(b.title)}">${paperCover(b, 'cover lg')}</a>
+      <div class="cont-body">
+        <strong class="t">${esc(b.title)}</strong>
+        <span class="muted sm tnum">Trang ${b.page || 0} / ${b.totalPages} · ${pct}% · ${esc(b.genre)}</span>
+        ${bar(pct)}
+        <div class="row-end"><span class="pill">Sách giấy</span><button type="button" class="btn primary" data-action="paper-log" data-id="${esc(b.id)}">Ghi lần đọc</button></div>
+      </div></div></section>`;
+}
+
+const paperLogs = (id) => S.sessions.filter((s) => s.bookId === id && s.kind === 'paper' && !s.deleted).sort((a, b) => b.end - a.end);
+
+function toDateInput(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// Ngày chọn + giờ hiện tại (để thứ tự các lần đọc trong ngày vẫn đúng).
+function fromDateInput(v) {
+  const [y, m, d] = v.split('-').map(Number);
+  const now = new Date();
+  const t = new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds());
+  return Math.min(+t, Date.now());
+}
+const fmtDay = (ts) => new Date(ts).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+function renderPaperDetail(id) {
+  const b = S.paper[id];
+  if (!b || b.deleted) { location.hash = '#/'; return; }
+  const pct = paperPct(b);
+  const logs = paperLogs(id);
+  const totalMin = Math.round(logs.reduce((a, s) => a + s.activeSec, 0) / 60);
+  app.innerHTML = `
+    <div class="page">
+      <header class="top"><div class="top-left"><a class="icon-btn" href="#/" aria-label="Về thư viện">${icon('back')}</a><span class="pill">Sách giấy</span></div>
+        <button type="button" class="icon-btn" data-action="paper-edit" data-id="${esc(id)}" aria-label="Sửa thông tin sách">${icon('edit')}</button></header>
+      <main class="main">
+        <section class="card cont">
+          ${paperCover(b, 'cover lg')}
+          <div class="cont-body">
+            <h1 class="pb-title">${esc(b.title)}</h1>
+            <span class="muted sm">${esc(b.author || 'Chưa có tác giả')} · ${esc(b.genre)} · ${b.totalPages} trang</span>
+            <span class="sm"><strong>${PAPER_STATUS[b.status]}</strong> · <span class="tnum">trang ${b.page || 0} / ${b.totalPages} · ${pct}%</span></span>
+            ${bar(pct)}
+          </div>
+        </section>
+        <section class="card pb-facts">
+          <div><span class="muted xs">Bắt đầu</span><strong class="tnum">${fmtDay(b.startedAt)}</strong></div>
+          <div><span class="muted xs">Đọc xong</span><strong class="tnum">${b.finishedAt ? fmtDay(b.finishedAt) : '—'}</strong></div>
+          <div><span class="muted xs">Tổng thời gian</span><strong class="tnum">${totalMin >= 60 ? `${(totalMin / 60).toLocaleString('vi-VN', { maximumFractionDigits: 1 })} giờ` : `${totalMin} phút`}</strong></div>
+          <div><span class="muted xs">Số lần đọc</span><strong class="tnum">${logs.length}</strong></div>
+        </section>
+        <div class="pb-actions">
+          <button type="button" class="btn primary" data-action="paper-log" data-id="${esc(id)}">Ghi lần đọc</button>
+          ${b.status === 'dropped'
+    ? `<button type="button" class="btn ghost" data-action="paper-status" data-id="${esc(id)}" data-status="reading">Đọc tiếp</button>`
+    : b.status === 'reading' ? `<button type="button" class="btn ghost" data-action="paper-status" data-id="${esc(id)}" data-status="dropped">Bỏ dở</button>` : ''}
+        </div>
+        <section aria-label="Các lần đọc"><h2 class="h2">Các lần đọc</h2>
+          ${logs.length ? `<div class="card log-list">${logs.map((s) => `
+            <div class="log">
+              <div><strong class="tnum">${fmtDay(s.end)}</strong>
+                <span class="muted sm tnum">Trang ${s.fromPage || 0} → ${s.toPage} (+${s.pages} trang) · ${Math.round(s.activeSec / 60)} phút</span></div>
+              <button type="button" class="icon-btn sm" data-action="paper-log-del" data-id="${esc(s.id)}" aria-label="Xoá lần đọc ngày ${fmtDay(s.end)}">${icon('trash', 18)}</button>
+            </div>`).join('')}</div>` : '<p class="muted sm">Chưa có lần đọc nào. Đọc xong một buổi thì bấm “Ghi lần đọc”.</p>'}
+        </section>
+        <button type="button" class="btn ghost danger" data-action="paper-del" data-id="${esc(id)}">Xoá sách này</button>
+      </main>
+    </div>`;
+}
+
+// Tính lại trang hiện tại & trạng thái từ các lần đọc còn lại (sau khi xoá một lần đọc).
+async function recomputePaper(id) {
+  const b = S.paper[id];
+  if (!b) return;
+  const logs = paperLogs(id);
+  const latest = logs[0];
+  b.page = latest ? latest.toPage : 0;
+  b.lastReadAt = latest ? latest.end : null;
+  if (b.page >= b.totalPages) { b.status = 'done'; b.finishedAt = b.finishedAt || latest.end; }
+  else if (b.status === 'done') { b.status = 'reading'; b.finishedAt = null; }
+  S.paper[id] = await savePaperBook(b);
+}
+
+function allGenres() {
+  return [...new Set([...S.books.map((b) => b.genre), ...activePaper(S.paper).map((b) => b.genre)])].filter(Boolean).sort((a, b) => a.localeCompare(b, 'vi'));
+}
+
+function openPaperEditor(rec) {
+  const isNew = !rec;
+  const b = rec || { title: '', author: '', genre: allGenres()[0] || '', totalPages: '', isbn: '', cover: null, status: 'reading', page: 0, startedAt: Date.now() };
+  const genres = allGenres();
+  document.querySelector('dialog.sheet')?.remove();
+  const dlg = document.createElement('dialog');
+  dlg.className = 'sheet';
+  dlg.setAttribute('aria-label', isNew ? 'Thêm sách giấy' : 'Sửa sách giấy');
+  dlg.innerHTML = `
+    <form class="sheet-body" novalidate>
+      <h2 class="sheet-title">${isNew ? 'Thêm sách giấy' : 'Sửa thông tin sách'}</h2>
+      <label for="pb-isbn">ISBN (mã vạch sau bìa) – không bắt buộc</label>
+      <div class="inline">
+        <input id="pb-isbn" type="text" inputmode="numeric" value="${esc(b.isbn || '')}" autocomplete="off" placeholder="978…">
+        ${canScan() ? `<button type="button" class="btn ghost" data-x="scan">${icon('scan', 18)}Quét</button>` : ''}
+        <button type="button" class="btn ghost" data-x="lookup">Tra</button>
+      </div>
+      <p class="muted xs pb-hint" role="status"></p>
+      <label for="pb-title">Tên sách *</label>
+      <input id="pb-title" type="text" value="${esc(b.title)}" autocomplete="off" required>
+      <label for="pb-author">Tác giả</label>
+      <input id="pb-author" type="text" value="${esc(b.author || '')}" autocomplete="off">
+      <label for="pb-genre">Thể loại *</label>
+      <select id="pb-genre">
+        ${genres.map((g) => `<option ${g === b.genre ? 'selected' : ''}>${esc(g)}</option>`).join('')}
+        <option value="__new" ${genres.length ? '' : 'selected'}>+ Thể loại mới…</option>
+      </select>
+      <input id="pb-genre-new" type="text" placeholder="Tên thể loại mới" autocomplete="off" ${genres.length ? 'hidden' : ''}>
+      <label for="pb-pages">Tổng số trang *</label>
+      <input id="pb-pages" type="number" inputmode="numeric" min="1" value="${esc(b.totalPages)}">
+      <label for="pb-start">Ngày bắt đầu</label>
+      <input id="pb-start" type="date" value="${toDateInput(b.startedAt)}" max="${toDateInput(Date.now())}">
+      ${isNew ? '' : `
+      <label for="pb-status">Trạng thái</label>
+      <select id="pb-status">${Object.entries(PAPER_STATUS).map(([k, v]) => `<option value="${k}" ${k === b.status ? 'selected' : ''}>${v}</option>`).join('')}</select>
+      <label for="pb-end">Ngày đọc xong</label>
+      <input id="pb-end" type="date" value="${b.finishedAt ? toDateInput(b.finishedAt) : ''}" max="${toDateInput(Date.now())}">`}
+      <p class="form-err" role="alert"></p>
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" data-x="cancel">Huỷ</button>
+        <button type="submit" class="btn primary">Lưu</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dlg);
+  const $ = (q) => dlg.querySelector(q);
+  const hint = $('.pb-hint');
+  const fill = (info) => {
+    if (info.title) $('#pb-title').value = info.title;
+    if (info.author) $('#pb-author').value = info.author;
+    if (info.totalPages) $('#pb-pages').value = info.totalPages;
+    b.cover = info.cover || b.cover;
+  };
+  const lookup = async (raw) => {
+    const isbn = normIsbn(raw);
+    if (!isbn) { hint.textContent = 'ISBN phải có 10 hoặc 13 chữ số.'; return; }
+    $('#pb-isbn').value = isbn;
+    hint.textContent = 'Đang tra cứu…';
+    const info = await lookupIsbn(isbn);
+    if (info) { fill(info); hint.textContent = `Đã điền từ dữ liệu sách. Kiểm tra lại${info.totalPages ? '' : ', nhập số trang'} nhé.`; }
+    else hint.textContent = 'Không tìm thấy trên Google Books / Open Library – nhập tay giúp em.';
+  };
+  $('#pb-genre').addEventListener('change', () => { $('#pb-genre-new').hidden = $('#pb-genre').value !== '__new'; });
+  dlg.addEventListener('click', async (e) => {
+    const x = e.target.closest('[data-x]')?.dataset.x;
+    if (x === 'cancel') dlg.close();
+    if (x === 'lookup') lookup($('#pb-isbn').value);
+    if (x === 'scan') {
+      try { const code = await scanIsbn(); if (code) lookup(code); } catch { hint.textContent = 'Không mở được camera. Gõ ISBN rồi bấm Tra.'; }
+    }
+  });
+  $('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = $('.form-err');
+    const title = $('#pb-title').value.trim();
+    const genre = $('#pb-genre').value === '__new' ? $('#pb-genre-new').value.trim() : $('#pb-genre').value;
+    const totalPages = parseInt($('#pb-pages').value, 10);
+    if (!title) { err.textContent = 'Nhập tên sách.'; return; }
+    if (!genre) { err.textContent = 'Chọn hoặc nhập thể loại.'; return; }
+    if (!(totalPages > 0)) { err.textContent = 'Nhập tổng số trang (số lớn hơn 0).'; return; }
+    const next = {
+      ...b,
+      id: b.id || newPaperId(),
+      title, genre, totalPages,
+      author: $('#pb-author').value.trim(),
+      isbn: normIsbn($('#pb-isbn').value) || '',
+      startedAt: $('#pb-start').value ? fromDateInput($('#pb-start').value) : b.startedAt,
+    };
+    if (!isNew) {
+      next.status = $('#pb-status').value;
+      const endV = $('#pb-end').value;
+      next.finishedAt = next.status === 'done' ? (endV ? fromDateInput(endV) : (b.finishedAt || Date.now())) : null;
+      if (next.status === 'done' && (next.page || 0) < totalPages) next.page = totalPages;
+    }
+    S.paper[next.id] = await savePaperBook(next);
+    dlg.close();
+    toast(isNew ? 'Đã thêm sách giấy' : 'Đã lưu');
+    if (isNew) location.hash = `#/paper/${encodeURIComponent(next.id)}`; else renderView();
+  });
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.showModal();
+  if (isNew) $('#pb-isbn').focus();
+}
+
+function openLogDialog(id) {
+  const b = S.paper[id];
+  if (!b) return;
+  document.querySelector('dialog.sheet')?.remove();
+  const dlg = document.createElement('dialog');
+  dlg.className = 'sheet';
+  dlg.setAttribute('aria-label', 'Ghi lần đọc');
+  dlg.innerHTML = `
+    <form class="sheet-body" novalidate>
+      <h2 class="sheet-title">Ghi lần đọc</h2>
+      <p class="muted sm">${esc(b.title)} · đang ở trang <span class="tnum">${b.page || 0} / ${b.totalPages}</span></p>
+      <label for="lg-page">Đọc đến trang *</label>
+      <input id="lg-page" type="number" inputmode="numeric" min="1" max="${b.totalPages}" autocomplete="off">
+      <label for="lg-min">Thời gian đọc (phút) *</label>
+      <input id="lg-min" type="number" inputmode="numeric" min="1" max="720" autocomplete="off">
+      <label for="lg-date">Ngày đọc</label>
+      <input id="lg-date" type="date" value="${toDateInput(Date.now())}" max="${toDateInput(Date.now())}">
+      <p class="form-err" role="alert"></p>
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" data-x="cancel">Huỷ</button>
+        <button type="submit" class="btn primary">Lưu</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dlg);
+  const $ = (q) => dlg.querySelector(q);
+  dlg.addEventListener('click', (e) => { if (e.target.closest('[data-x="cancel"]')) dlg.close(); });
+  $('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = $('.form-err');
+    const toPage = parseInt($('#lg-page').value, 10);
+    const minutes = parseInt($('#lg-min').value, 10);
+    if (!(toPage >= 1 && toPage <= b.totalPages)) { err.textContent = `Trang phải từ 1 đến ${b.totalPages}.`; return; }
+    if (!(minutes >= 1 && minutes <= 720)) { err.textContent = 'Nhập số phút đọc (1–720).'; return; }
+    const end = $('#lg-date').value ? fromDateInput($('#lg-date').value) : Date.now();
+    const fromPage = b.page || 0;
+    const rec = {
+      id: crypto.randomUUID(), kind: 'paper', bookId: b.id, title: b.title, genre: b.genre,
+      start: end - minutes * 60_000, end, rev: Date.now(), activeSec: minutes * 60,
+      pages: Math.max(0, toPage - fromPage), fromPage, toPage, device: 'Sách giấy',
+    };
+    await db.set('sessions', null, rec);
+    S.sessions.push(rec);
+    b.page = toPage;
+    b.lastReadAt = Math.max(b.lastReadAt || 0, end);
+    if (toPage >= b.totalPages) { b.status = 'done'; b.finishedAt = b.finishedAt || end; }
+    else { b.status = 'reading'; b.finishedAt = null; }
+    S.paper[id] = await savePaperBook(b);
+    scheduleSync(5000);
+    dlg.close();
+    toast(b.status === 'done' ? 'Đã ghi – đã đọc xong cuốn này' : `Đã ghi +${rec.pages} trang, ${minutes} phút`);
+    renderView();
+  });
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.showModal();
+  $('#lg-page').focus();
 }
 
 function seriesCard(g) {
@@ -711,7 +1005,7 @@ function openArticleEditor({ url, title }) {
 // ---------------- Màn Thống kê ----------------
 function renderStats() {
   const st = computeStats({
-    sessions: S.sessions, progress: S.progress, books: S.books, articles: S.articles, period: S.statsPeriod,
+    sessions: S.sessions, progress: S.progress, books: S.books, articles: S.articles, paper: S.paper, period: S.statsPeriod,
   });
   // Đang đọc: gom theo bộ, mới nhất ở trên.
   const reading = S.books
@@ -735,6 +1029,11 @@ function renderStats() {
       rows.push(`<div class="gbar"><div class="gbar-head"><span>${esc(x.title)}</span><span class="muted tnum">${pct}%</span></div>${bar(pct)}</div>`);
     }
     if (rows.length >= 6) break;
+  }
+  for (const pb of activePaper(S.paper).filter((x) => x.status === 'reading').sort((a, b) => (b.lastReadAt || 0) - (a.lastReadAt || 0))) {
+    if (rows.length >= 8) break;
+    const pct = paperPct(pb);
+    rows.push(`<div class="gbar"><div class="gbar-head"><span>${esc(pb.title)} <span class="pill">Sách giấy</span></span><span class="muted tnum">${pct}%</span></div>${bar(pct)}</div>`);
   }
   app.innerHTML = `<div class="page wide">${renderStatsHtml(st, { readingRows: rows.join('') })}${nav('stats')}</div>`;
 }
@@ -911,6 +1210,40 @@ async function onClick(e) {
   const id = el.dataset.id;
   if (a === 'signin') return signIn();
   if (a === 'art-add') return addFromInput();
+  if (a === 'paper-new') return openPaperEditor(null);
+  if (a === 'paper-edit') return openPaperEditor(S.paper[id]);
+  if (a === 'paper-log') return openLogDialog(id);
+  if (a === 'paper-status') {
+    const b = S.paper[id];
+    if (b) { b.status = el.dataset.status; S.paper[id] = await savePaperBook(b); toast(b.status === 'dropped' ? 'Đã chuyển sang Bỏ dở' : 'Đã chuyển sang Đang đọc'); renderView(); }
+    return;
+  }
+  if (a === 'paper-log-del') {
+    const s = S.sessions.find((x) => x.id === id);
+    if (!s) return;
+    const before = { ...s };
+    Object.assign(s, { deleted: true, activeSec: 0, rev: Date.now() });
+    await db.set('sessions', null, s);
+    await recomputePaper(s.bookId);
+    scheduleSync(5000);
+    renderView();
+    toast('Đã xoá lần đọc', { label: 'Hoàn tác', fn: async () => {
+      delete s.deleted;
+      Object.assign(s, before, { rev: Date.now() });
+      await db.set('sessions', null, s);
+      await recomputePaper(s.bookId);
+      scheduleSync(5000);
+      renderView();
+    } });
+    return;
+  }
+  if (a === 'paper-del') {
+    const before = await deletePaperBook(id);
+    S.paper = await loadPaper();
+    location.hash = '#/';
+    if (before) toast('Đã xoá sách', { label: 'Hoàn tác', fn: async () => { S.paper[id] = await savePaperBook(before); renderView(); } });
+    return;
+  }
   if (a === 'stats-period') { S.statsPeriod = el.dataset.period; return renderStats(); }
   if (a === 'art-tag') { S.artTag = S.artTag === el.dataset.tag ? '' : el.dataset.tag; return renderArticles(); }
   if (a === 'art-edit') { const r = S.articles[id]; if (r) openArticleEditor({ url: r.url, title: r.title }); return; }

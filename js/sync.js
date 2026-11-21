@@ -33,15 +33,17 @@ export async function syncNow() {
     const [localProgress, localSessions, localPrefs, localArticles, meta] = await Promise.all([
       db.entries('progress'), db.all('sessions'), db.get('kv', 'prefs'), db.get('kv', 'articles'), db.get('kv', 'syncMeta'),
     ]);
+    const localPaper = await db.get('kv', 'paper');
     const remote = await readAppState();
     const r = remote.data || {};
     const progress = mergeMap(Object.fromEntries(localProgress), r.progress);
     const prefs = mergeMap(localPrefs || {}, r.prefs);
     const articles = mergeMap(localArticles || {}, r.articles);
+    const paper = mergeMap(localPaper || {}, r.paper);
     const sessMap = new Map((r.sessions || []).map((s) => [s.id, s]));
     for (const s of localSessions) {
       const o = sessMap.get(s.id);
-      if (!o || (s.end || 0) > (o.end || 0)) sessMap.set(s.id, s);
+      if (!o || (s.rev || s.end || 0) > (o.rev || o.end || 0)) sessMap.set(s.id, s);
     }
     const sessions = [...sessMap.values()].sort((a, b) => a.start - b.start);
 
@@ -50,21 +52,27 @@ export async function syncNow() {
       const cur = localProgress.find(([id]) => id === k)?.[1];
       if (!cur || cur.updatedAt < v.updatedAt) await db.set('progress', k, v);
     }
-    const localIdsSet = new Set(localSessions.map((s) => s.id));
-    for (const s of sessions) if (!localIdsSet.has(s.id)) await db.set('sessions', null, s);
+    const localById = new Map(localSessions.map((s) => [s.id, s]));
+    for (const s of sessions) {
+      const l = localById.get(s.id);
+      if (!l || (s.rev || s.end || 0) > (l.rev || l.end || 0)) await db.set('sessions', null, s);
+    }
     // Gộp lại lần nữa với bản trên máy, phòng khi anh vừa sửa trong lúc đang đồng bộ.
     Object.assign(prefs, mergeMap(prefs, await db.get('kv', 'prefs')));
     Object.assign(articles, mergeMap(articles, await db.get('kv', 'articles')));
+    Object.assign(paper, mergeMap(paper, await db.get('kv', 'paper')));
+    await db.set('kv', 'paper', paper);
     await db.set('kv', 'prefs', prefs);
     await db.set('kv', 'articles', articles);
 
     // Ghi lên Drive nếu có thay đổi
-    const payload = { v: 1, progress: sortKeys(progress), prefs: sortKeys(prefs), articles: sortKeys(articles), sessions };
+    const payload = { v: 1, progress: sortKeys(progress), prefs: sortKeys(prefs), articles: sortKeys(articles), paper: sortKeys(paper), sessions };
     const remoteNorm = {
       v: 1,
       progress: sortKeys(r.progress || {}),
       prefs: sortKeys(r.prefs || {}),
       articles: sortKeys(r.articles || {}),
+      paper: sortKeys(r.paper || {}),
       sessions: [...(r.sessions || [])].sort((a, b) => a.start - b.start),
     };
     let fileId = remote.fileId;
