@@ -3,7 +3,6 @@
 // Lưu ở kv 'paper' (map id -> sách); xoá = đánh dấu deleted để máy khác xoá theo khi đồng bộ.
 import { db } from './db.js';
 import { scheduleSync } from './sync.js';
-import { getToken } from './auth.js';
 import { uploadAppDataFile, downloadFileBlob } from './drive.js';
 
 export async function loadPaper() {
@@ -57,30 +56,117 @@ const toBase64 = (blob) => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 
-// Gửi ảnh bìa tới Apps Script để Gemini đọc tên sách, tác giả, số tập...
-export async function readCoverText(gasUrl, imageBlob) {
-  if (!gasUrl) throw new Error('Chưa cài địa chỉ Apps Script đọc ảnh bìa (Cài đặt)');
-  const token = await getToken();
-  if (!token) throw new Error('Cần kết nối lại Google trước khi đọc ảnh bìa');
+// ---------- Đọc ảnh bìa bằng Gemini (gọi thẳng từ app) ----------
+// Key do chủ app dán vào Cài đặt: lưu trên máy + đồng bộ qua thư mục ẩn trên Drive, không nằm trong mã nguồn.
+const GEMINI = 'https://generativelanguage.googleapis.com/v1beta';
+const PER_MODEL_TIMEOUT = 20_000;
+
+const PROMPT = [
+  'Đây là ảnh chụp bìa trước một cuốn sách hoặc một tập truyện tranh (thường là sách phát hành tại Việt Nam).',
+  'Hãy đọc đúng chữ in trên bìa và trả về JSON với các trường:',
+  '- title: tên sách đúng như in trên bìa, giữ nguyên dấu tiếng Việt, viết hoa như bình thường (không viết hoa toàn bộ). Với truyện tranh nhiều tập: tên bộ truyện, KHÔNG kèm số tập.',
+  '- series: tên bộ nếu là truyện/sách nhiều tập, ngược lại null.',
+  '- volume: số tập (số nguyên) nếu bìa có ghi, ngược lại null.',
+  '- author: tác giả (viết hoa chữ cái đầu, ví dụ "Kurt Vonnegut").',
+  '- translator: người dịch nếu bìa ghi "... dịch", ngược lại null.',
+  '- publisher: nhà xuất bản / đơn vị phát hành in trên bìa (nối bằng " · " nếu có nhiều), ngược lại null.',
+  'Không đoán thông tin không có trên ảnh: thiếu thì để null.',
+].join('\n');
+
+const SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    title: { type: 'STRING', nullable: true },
+    series: { type: 'STRING', nullable: true },
+    volume: { type: 'INTEGER', nullable: true },
+    author: { type: 'STRING', nullable: true },
+    translator: { type: 'STRING', nullable: true },
+    publisher: { type: 'STRING', nullable: true },
+  },
+};
+
+async function gem(path, key, opts = {}) {
+  return fetch(`${GEMINI}/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`, opts);
+}
+
+// Chọn tối đa 3 model để gửi song song: 2.5-flash, 2.5-flash-lite (đã ổn định) + bản flash mới nhất. Lưu danh sách 1 ngày.
+export async function pickGeminiModels(key, { force = false } = {}) {
+  const cached = await db.get('kv', 'geminiModels');
+  if (!force && cached && cached.key === key.slice(-6) && Date.now() - cached.at < 864e5) return cached.models;
+  const res = await gem('models?pageSize=200', key);
+  if (res.status === 400 || res.status === 403) throw new Error('Gemini API key không hợp lệ hoặc chưa được phép dùng từ app này');
+  if (!res.ok) throw new Error(`Không lấy được danh sách model Gemini (lỗi ${res.status})`);
+  const names = ((await res.json()).models || [])
+    .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map((m) => m.name.replace('models/', ''))
+    .filter((n) => /^gemini-[\d.]+-flash/.test(n) && !/(image|tts|audio|live|thinking|embedding|preview|exp)/.test(n));
+  const ver = (n) => parseFloat(n.match(/^gemini-([\d.]+)/)[1]);
+  const pick = [];
+  for (const want of ['gemini-2.5-flash', 'gemini-2.5-flash-lite']) if (names.includes(want)) pick.push(want);
+  const newest = names.filter((n) => !/lite/.test(n) && !pick.includes(n)).sort((a, b) => ver(b) - ver(a) || a.length - b.length)[0];
+  if (newest) pick.push(newest);
+  for (const n of names.sort((a, b) => ver(b) - ver(a))) if (pick.length < 3 && !pick.includes(n)) pick.push(n);
+  if (!pick.length) throw new Error('Không tìm thấy model Gemini flash phù hợp');
+  await db.set('kv', 'geminiModels', { key: key.slice(-6), at: Date.now(), models: pick });
+  return pick;
+}
+
+async function askModel(model, key, b64, outerSignal) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 60_000);
-  let res;
+  const timer = setTimeout(() => ctrl.abort(), PER_MODEL_TIMEOUT);
+  const onOuter = () => ctrl.abort();
+  outerSignal.addEventListener('abort', onOuter);
+  const body = (thinking) => JSON.stringify({
+    contents: [{ parts: [{ inline_data: { mime_type: 'image/jpeg', data: b64 } }, { text: PROMPT }] }],
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA, ...(thinking ? { thinkingConfig: thinking } : {}) },
+  });
+  const send = (thinking) => gem(`models/${model}:generateContent`, key, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body(thinking), signal: ctrl.signal,
+  });
   try {
-    res = await fetch(gasUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // tránh preflight CORS với Apps Script
-      body: JSON.stringify({ token, image: await toBase64(imageBlob) }),
-      redirect: 'follow',
-      signal: ctrl.signal,
-    });
+    // Tắt "suy nghĩ" cho nhanh; model không nhận tham số này thì gửi lại không kèm.
+    let res = await send(/^gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: 'low' });
+    if (res.status === 400) {
+      const t = await res.text();
+      if (/thinking/i.test(t)) res = await send(null);
+      else throw Object.assign(new Error(`Gemini từ chối yêu cầu: ${t.slice(0, 200)}`), { status: 400 });
+    }
+    if (!res.ok) throw Object.assign(new Error(`${model} lỗi ${res.status}`), { status: res.status });
+    const j = await res.json();
+    const text = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+    if (!text) throw new Error(`${model} không trả kết quả`);
+    return { ...JSON.parse(text), _model: model };
   } catch (e) {
-    if (e.name === 'AbortError') throw new Error('Quá 60 giây chưa có kết quả. Anh nhập tay giúp em, hoặc thử lại sau.');
-    throw new Error('Không gọi được Apps Script (kiểm tra mạng hoặc địa chỉ trong Cài đặt)');
-  } finally { clearTimeout(timer); }
-  if (!res.ok) throw new Error(`Apps Script trả lỗi ${res.status}`);
-  const j = await res.json();
-  if (!j.ok) throw new Error(j.error || 'Không đọc được ảnh bìa');
-  return { ...(j.data || {}), _ms: j.ms || null };
+    if (e.name === 'AbortError') throw Object.assign(new Error(`${model} quá ${PER_MODEL_TIMEOUT / 1000} giây`), { status: 'timeout' });
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    outerSignal.removeEventListener('abort', onOuter);
+  }
+}
+
+// Gửi cùng lúc tới các model, lấy kết quả đầu tiên, huỷ phần còn lại.
+export async function readCoverText(key, imageBlob) {
+  if (!key) throw new Error('Chưa nhập Gemini API key (vào Cài đặt để nhập)');
+  if (!navigator.onLine) throw new Error('Đang offline, chưa đọc được ảnh bìa');
+  const models = await pickGeminiModels(key);
+  const b64 = await toBase64(imageBlob);
+  const all = new AbortController();
+  try {
+    const r = await Promise.any(models.map((m) => askModel(m, key, b64, all.signal)));
+    return r;
+  } catch (agg) {
+    const errs = agg.errors || [agg];
+    if (errs.some((e) => e.status === 400 || e.status === 403)) {
+      await db.del('kv', 'geminiModels');
+      throw new Error(errs.find((e) => e.status === 400 || e.status === 403).message);
+    }
+    if (errs.every((e) => e.status === 'timeout')) throw new Error('Gemini quá 20 giây chưa trả lời. Thử lại sau hoặc nhập tay.');
+    if (errs.some((e) => e.status === 503 || e.status === 429)) throw new Error('Gemini đang quá tải. Thử lại sau ít phút hoặc nhập tay.');
+    throw new Error(errs[0]?.message || 'Không đọc được ảnh bìa');
+  } finally {
+    all.abort();
+  }
 }
 
 // Ảnh bìa: lưu ngay trên máy (IndexedDB) và tải lên thư mục ẩn của Drive để máy khác cũng thấy.

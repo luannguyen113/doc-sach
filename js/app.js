@@ -16,7 +16,7 @@ import {
 } from './articles.js';
 import { computeStats, renderStatsHtml } from './stats.js';
 import {
-  loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, paperTitle, shrinkImage, readCoverText, saveCover, fetchCover,
+  loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, paperTitle, shrinkImage, readCoverText, pickGeminiModels, saveCover, fetchCover,
 } from './paper.js';
 
 const app = document.getElementById('app');
@@ -62,8 +62,8 @@ async function boot() {
   ]);
   S.articles = articles;
   S.paper = await loadPaper();
-  const gas = await getPref('gasUrl');
-  if (gas && !S.settings.gasUrl) S.settings.gasUrl = gas;
+  const gk = await getPref('geminiKey');
+  if (gk != null && !S.settings.geminiKey) S.settings.geminiKey = gk;
   if (settings) S.settings = { ...S.settings, ...settings };
   if (lib) { S.books = lib.books || []; S.scannedAt = lib.scannedAt || 0; }
   S.progress = Object.fromEntries(progressEntries);
@@ -133,8 +133,8 @@ async function reloadFromDb() {
   S.sessions = s;
   S.articles = a;
   S.paper = await loadPaper();
-  const gas = await getPref('gasUrl');
-  if (gas) S.settings.gasUrl = gas;
+  const gk = await getPref('geminiKey');
+  if (gk != null) S.settings.geminiKey = gk;
   runPolicy();
   if (!S.reader) renderView();
 }
@@ -780,7 +780,7 @@ function openPaperEditor(rec, preset) {
     const tick = setInterval(() => { hint.textContent = `Đang đọc ảnh bìa… ${Math.round((Date.now() - t0) / 1000)} giây`; }, 1000);
     try {
       const big = await shrinkImage(file, 1024, 0.8);
-      const info = await readCoverText(S.settings.gasUrl, big).finally(() => clearInterval(tick));
+      const info = await readCoverText(S.settings.geminiKey, big).finally(() => clearInterval(tick));
       const set = (sel, v) => { if (v != null && v !== '') $(sel).value = v; };
       set('#pb-title', info.title);
       set('#pb-series', info.series || (info.volume ? info.title : ''));
@@ -791,7 +791,7 @@ function openPaperEditor(rec, preset) {
       fillFromSeries();
       const secs = Math.round((Date.now() - t0) / 1000);
       hint.textContent = info.title ? `Đã điền từ ảnh bìa sau ${secs} giây. Kiểm tra lại và nhập số trang.` : 'Không đọc được chữ trên bìa, anh nhập tay giúp em.';
-      if (info._ms) console.info('Thời gian đọc bìa (ms):', info._ms);
+      console.info('Đọc bìa bằng', info._model, 'sau', secs, 'giây');
     } catch (err) { clearInterval(tick); hint.textContent = err.message; }
   });
   $('#pb-genre').addEventListener('change', () => { $('#pb-genre-new').hidden = $('#pb-genre').value !== '__new'; });
@@ -1169,9 +1169,9 @@ async function renderSettings() {
           <p class="muted xs">Mỗi thư mục con là một thể loại, ví dụ “${esc(S.settings.rootFolder)}/Truyện tranh”.</p>
         </section>
         <section class="card form">
-          <label for="gas-url">Địa chỉ Apps Script đọc ảnh bìa (sách giấy)</label>
-          <div class="inline"><input id="gas-url" type="url" value="${esc(S.settings.gasUrl || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"><button type="button" class="btn" data-action="save-gas">Lưu</button></div>
-          <p class="muted xs">Dán địa chỉ web app sau khi Deploy. Chỉ cần nhập trên một máy, các máy khác tự đồng bộ.</p>
+          <label for="gem-key">Gemini API key (đọc ảnh bìa sách giấy)</label>
+          <div class="inline"><input id="gem-key" type="password" value="${esc(S.settings.geminiKey || '')}" placeholder="AIza…" autocomplete="off" spellcheck="false"><button type="button" class="btn" data-action="save-gem">Lưu & thử</button></div>
+          <p class="muted xs">Key chỉ lưu trên máy này và trong thư mục ẩn trên Google Drive của bạn (để máy khác tự có), không nằm trong mã nguồn app.</p>
         </section>
         <section class="card form">
           <label class="switch-row"><span><strong>Cho phép tải offline bằng 4G</strong><br><span class="muted xs">Tắt: dùng 4G thì app hỏi trước khi tải. Wi-Fi luôn tự tải.</span></span><input type="checkbox" data-setting="allowCellular" ${S.settings.allowCellular ? 'checked' : ''}></label>
@@ -1414,13 +1414,16 @@ async function onClick(e) {
     location.hash = '#/';
     return refresh({ force: true });
   }
-  if (a === 'save-gas') {
-    const v = app.querySelector('#gas-url').value.trim();
-    if (v && !/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(v)) { toast('Địa chỉ phải có dạng https://script.google.com/macros/s/…/exec'); return; }
-    S.settings.gasUrl = v;
+  if (a === 'save-gem') {
+    const v = app.querySelector('#gem-key').value.trim();
+    S.settings.geminiKey = v;
     await saveSettings();
-    await setPref('gasUrl', v);
-    toast('Đã lưu địa chỉ Apps Script');
+    await setPref('geminiKey', v);
+    if (!v) { toast('Đã xoá Gemini API key'); return; }
+    try {
+      const models = await pickGeminiModels(v, { force: true });
+      toast(`Key dùng được – sẽ thử ${models.length} model: ${models.join(', ')}`);
+    } catch (err) { toast(err.message); }
     return;
   }
   if (a === 'unallow') {
