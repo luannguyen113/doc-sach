@@ -775,10 +775,12 @@ function openPaperEditor(rec, preset) {
       $('.pb-prev').innerHTML = `<img src="${URL.createObjectURL(coverBlob)}" alt="">`;
     } catch { hint.textContent = 'Không đọc được ảnh này, thử ảnh khác.'; return; }
     if (netType() === 'offline') { hint.textContent = 'Đang offline: đã lưu ảnh bìa, anh nhập thông tin bằng tay.'; return; }
+    const t0 = Date.now();
     hint.textContent = 'Đang đọc ảnh bìa…';
+    const tick = setInterval(() => { hint.textContent = `Đang đọc ảnh bìa… ${Math.round((Date.now() - t0) / 1000)} giây`; }, 1000);
     try {
-      const big = await shrinkImage(file, 1280, 0.85);
-      const info = await readCoverText(S.settings.gasUrl, big);
+      const big = await shrinkImage(file, 1024, 0.8);
+      const info = await readCoverText(S.settings.gasUrl, big).finally(() => clearInterval(tick));
       const set = (sel, v) => { if (v != null && v !== '') $(sel).value = v; };
       set('#pb-title', info.title);
       set('#pb-series', info.series || (info.volume ? info.title : ''));
@@ -787,8 +789,10 @@ function openPaperEditor(rec, preset) {
       set('#pb-trans', info.translator);
       set('#pb-pub', info.publisher);
       fillFromSeries();
-      hint.textContent = info.title ? 'Đã điền từ ảnh bìa. Kiểm tra lại và nhập số trang.' : 'Không đọc được chữ trên bìa, anh nhập tay giúp em.';
-    } catch (err) { hint.textContent = err.message; }
+      const secs = Math.round((Date.now() - t0) / 1000);
+      hint.textContent = info.title ? `Đã điền từ ảnh bìa sau ${secs} giây. Kiểm tra lại và nhập số trang.` : 'Không đọc được chữ trên bìa, anh nhập tay giúp em.';
+      if (info._ms) console.info('Thời gian đọc bìa (ms):', info._ms);
+    } catch (err) { clearInterval(tick); hint.textContent = err.message; }
   });
   $('#pb-genre').addEventListener('change', () => { $('#pb-genre-new').hidden = $('#pb-genre').value !== '__new'; });
   dlg.addEventListener('click', (e) => { if (e.target.closest('[data-x="cancel"]')) dlg.close(); });

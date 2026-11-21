@@ -62,16 +62,25 @@ export async function readCoverText(gasUrl, imageBlob) {
   if (!gasUrl) throw new Error('Chưa cài địa chỉ Apps Script đọc ảnh bìa (Cài đặt)');
   const token = await getToken();
   if (!token) throw new Error('Cần kết nối lại Google trước khi đọc ảnh bìa');
-  const res = await fetch(gasUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // tránh preflight CORS với Apps Script
-    body: JSON.stringify({ token, image: await toBase64(imageBlob) }),
-    redirect: 'follow',
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60_000);
+  let res;
+  try {
+    res = await fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // tránh preflight CORS với Apps Script
+      body: JSON.stringify({ token, image: await toBase64(imageBlob) }),
+      redirect: 'follow',
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Quá 60 giây chưa có kết quả. Anh nhập tay giúp em, hoặc thử lại sau.');
+    throw new Error('Không gọi được Apps Script (kiểm tra mạng hoặc địa chỉ trong Cài đặt)');
+  } finally { clearTimeout(timer); }
   if (!res.ok) throw new Error(`Apps Script trả lỗi ${res.status}`);
   const j = await res.json();
   if (!j.ok) throw new Error(j.error || 'Không đọc được ảnh bìa');
-  return j.data || {};
+  return { ...(j.data || {}), _ms: j.ms || null };
 }
 
 // Ảnh bìa: lưu ngay trên máy (IndexedDB) và tải lên thư mục ẩn của Drive để máy khác cũng thấy.

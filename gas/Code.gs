@@ -13,19 +13,31 @@ const ALLOWED_EMAIL = 'luannguyen113@gmail.com';
 const CLIENT_ID = '878030336042-18q2nhn7ihp8i42galb3gljgtf45uib4.apps.googleusercontent.com';
 
 function doPost(e) {
+  const t0 = Date.now();
+  const ms = {};
   try {
     const body = JSON.parse(e.postData.contents || '{}');
     checkCaller_(body.token);
+    ms.auth = Date.now() - t0;
     if (!body.image) throw new Error('Thiếu ảnh');
-    return json_({ ok: true, data: readCover_(body.image) });
+    const data = readCover_(body.image, ms);
+    ms.total = Date.now() - t0;
+    console.log('Đọc bìa xong', JSON.stringify(ms));
+    return json_({ ok: true, data: data, ms: ms });
   } catch (err) {
-    return json_({ ok: false, error: String(err.message || err) });
+    ms.total = Date.now() - t0;
+    console.error('Lỗi đọc bìa', String(err.message || err), JSON.stringify(ms));
+    return json_({ ok: false, error: String(err.message || err), ms: ms });
   }
 }
 
 // Chỉ chấp nhận yêu cầu từ app Đọc sách, đăng nhập bằng đúng tài khoản Google của chủ app.
 function checkCaller_(token) {
   if (!token) throw new Error('Thiếu token đăng nhập');
+  // Token đã xác minh thì nhớ 50 phút, khỏi gọi Google kiểm tra lại mỗi lần.
+  const cache = CacheService.getScriptCache();
+  const ck = 'ok:' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, token));
+  if (cache.get(ck)) return;
   const info = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?access_token=' + encodeURIComponent(token), { muteHttpExceptions: true });
   if (info.getResponseCode() !== 200) throw new Error('Token không hợp lệ hoặc đã hết hạn');
   const ti = JSON.parse(info.getContentText());
@@ -36,12 +48,16 @@ function checkCaller_(token) {
   if (about.getResponseCode() !== 200) throw new Error('Không xác minh được tài khoản');
   const email = JSON.parse(about.getContentText()).user.emailAddress;
   if (String(email).toLowerCase() !== ALLOWED_EMAIL) throw new Error('Tài khoản không được phép');
+  cache.put(ck, '1', 3000);
 }
 
-function readCover_(b64) {
+function readCover_(b64, ms) {
+  const t0 = Date.now();
   const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!key) throw new Error('Chưa cài GEMINI_API_KEY trong Script Properties');
   const model = pickModel_(key);
+  ms.model = Date.now() - t0;
+  ms.modelName = model;
   const prompt = [
     'Đây là ảnh chụp bìa trước một cuốn sách hoặc một tập truyện tranh (thường là sách phát hành tại Việt Nam).',
     'Hãy đọc đúng chữ in trên bìa và trả về JSON với các trường:',
@@ -57,6 +73,8 @@ function readCover_(b64) {
     contents: [{ parts: [{ inline_data: { mime_type: 'image/jpeg', data: b64 } }, { text: prompt }] }],
     generationConfig: {
       temperature: 0,
+      // Tắt chế độ "suy nghĩ" để trả kết quả nhanh: đọc bìa sách không cần suy luận.
+      thinkingConfig: { thinkingBudget: 0 },
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'OBJECT',
@@ -71,9 +89,23 @@ function readCover_(b64) {
       },
     },
   };
-  const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + key, {
-    method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true,
-  });
+  const call = function () {
+    return UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + key, {
+      method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true,
+    });
+  };
+  const t1 = Date.now();
+  let res = call();
+  // Model không cho tắt hẳn "suy nghĩ": thử mức thấp nhất, rồi bỏ hẳn tham số này.
+  if (res.getResponseCode() === 400 && /thinking/i.test(res.getContentText())) {
+    payload.generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+    res = call();
+    if (res.getResponseCode() === 400 && /thinking/i.test(res.getContentText())) {
+      delete payload.generationConfig.thinkingConfig;
+      res = call();
+    }
+  }
+  ms.gemini = Date.now() - t1;
   if (res.getResponseCode() !== 200) {
     // Model có thể đã bị ngừng: xoá lựa chọn đã lưu để lần sau chọn lại.
     PropertiesService.getScriptProperties().deleteProperty('AUTO_MODEL');
