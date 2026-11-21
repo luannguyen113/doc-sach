@@ -5,7 +5,7 @@
  *
  * Cài đặt (một lần):
  *  1. Project Settings → Script Properties → thêm GEMINI_API_KEY = <key lấy ở aistudio.google.com>
- *  2. (Tuỳ chọn) GEMINI_MODEL = tên model muốn dùng. Bỏ trống thì script tự chọn model "flash" mới nhất.
+ *  2. (Tuỳ chọn) GEMINI_MODEL = model muốn thử đầu tiên. Bỏ trống thì script tự lập danh sách model "flash" và thử lần lượt.
  *  3. Deploy → New deployment → Web app → Execute as: Me, Who has access: Anyone → copy URL dán vào app.
  */
 
@@ -55,9 +55,8 @@ function readCover_(b64, ms) {
   const t0 = Date.now();
   const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!key) throw new Error('Chưa cài GEMINI_API_KEY trong Script Properties');
-  const model = pickModel_(key);
+  const models = pickModels_(key);
   ms.model = Date.now() - t0;
-  ms.modelName = model;
   const prompt = [
     'Đây là ảnh chụp bìa trước một cuốn sách hoặc một tập truyện tranh (thường là sách phát hành tại Việt Nam).',
     'Hãy đọc đúng chữ in trên bìa và trả về JSON với các trường:',
@@ -73,8 +72,6 @@ function readCover_(b64, ms) {
     contents: [{ parts: [{ inline_data: { mime_type: 'image/jpeg', data: b64 } }, { text: prompt }] }],
     generationConfig: {
       temperature: 0,
-      // Tắt chế độ "suy nghĩ" để trả kết quả nhanh: đọc bìa sách không cần suy luận.
-      thinkingConfig: { thinkingBudget: 0 },
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'OBJECT',
@@ -89,27 +86,25 @@ function readCover_(b64, ms) {
       },
     },
   };
-  const call = function () {
-    return UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + key, {
-      method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true,
-    });
-  };
   const t1 = Date.now();
-  let res = call();
-  // Model không cho tắt hẳn "suy nghĩ": thử mức thấp nhất, rồi bỏ hẳn tham số này.
-  if (res.getResponseCode() === 400 && /thinking/i.test(res.getContentText())) {
-    payload.generationConfig.thinkingConfig = { thinkingLevel: 'low' };
-    res = call();
-    if (res.getResponseCode() === 400 && /thinking/i.test(res.getContentText())) {
-      delete payload.generationConfig.thinkingConfig;
-      res = call();
-    }
+  const tried = [];
+  let res = null;
+  // Thử lần lượt các model; model nào bận (503/429/500) hoặc không còn (404) thì chuyển model kế tiếp.
+  for (let i = 0; i < models.length && Date.now() - t1 < 40000; i++) {
+    const model = models[i];
+    res = callGemini_(model, key, payload);
+    if (res.getResponseCode() === 503 && i === 0) { Utilities.sleep(1500); res = callGemini_(model, key, payload); }
+    tried.push(model + ':' + res.getResponseCode());
+    if (res.getResponseCode() === 200) { ms.modelName = model; break; }
+    if (res.getResponseCode() === 404) PropertiesService.getScriptProperties().deleteProperty('AUTO_MODELS');
+    if ([429, 500, 503, 404].indexOf(res.getResponseCode()) < 0) break; // lỗi khác (key sai...) thì dừng
   }
   ms.gemini = Date.now() - t1;
-  if (res.getResponseCode() !== 200) {
-    // Model có thể đã bị ngừng: xoá lựa chọn đã lưu để lần sau chọn lại.
-    PropertiesService.getScriptProperties().deleteProperty('AUTO_MODEL');
-    throw new Error('Gemini lỗi ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 300));
+  ms.tried = tried.join(', ');
+  if (!res || res.getResponseCode() !== 200) {
+    const code = res ? res.getResponseCode() : 0;
+    if (code === 503 || code === 429) throw new Error('Gemini đang quá tải ở tất cả model đã thử. Thử lại sau ít phút hoặc nhập tay.');
+    throw new Error('Gemini lỗi ' + code + ': ' + (res ? res.getContentText().slice(0, 300) : ''));
   }
   const out = JSON.parse(res.getContentText());
   const text = out.candidates && out.candidates[0] && out.candidates[0].content.parts.map(function (p) { return p.text || ''; }).join('');
@@ -117,25 +112,44 @@ function readCover_(b64, ms) {
   return JSON.parse(text);
 }
 
-// Dùng GEMINI_MODEL nếu có; không thì tự chọn model "flash" bản ổn định mới nhất hỗ trợ đọc ảnh, lưu lại để dùng tiếp.
-function pickModel_(key) {
+// Gọi Gemini, tắt chế độ "suy nghĩ" cho nhanh; model không hỗ trợ tham số này thì gọi lại không có nó.
+function callGemini_(model, key, payload) {
+  const send = function (p) {
+    return UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + key, {
+      method: 'post', contentType: 'application/json', payload: JSON.stringify(p), muteHttpExceptions: true,
+    });
+  };
+  const fast = JSON.parse(JSON.stringify(payload));
+  fast.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  let res = send(fast);
+  if (res.getResponseCode() === 400 && /thinking/i.test(res.getContentText())) {
+    fast.generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+    res = send(fast);
+    if (res.getResponseCode() === 400 && /thinking/i.test(res.getContentText())) res = send(payload);
+  }
+  return res;
+}
+
+// Danh sách model thử lần lượt: GEMINI_MODEL (nếu đặt) → các bản "flash" ổn định, mới trước → bản preview → bản "flash-lite".
+function pickModels_(key) {
   const props = PropertiesService.getScriptProperties();
   const fixed = props.getProperty('GEMINI_MODEL');
-  if (fixed) return fixed;
-  const cached = props.getProperty('AUTO_MODEL');
-  if (cached) return cached;
-  const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=' + key, { muteHttpExceptions: true });
-  if (res.getResponseCode() !== 200) throw new Error('Không lấy được danh sách model Gemini: ' + res.getContentText().slice(0, 200));
-  const models = (JSON.parse(res.getContentText()).models || [])
-    .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0; })
-    .map(function (m) { return m.name.replace('models/', ''); })
-    .filter(function (n) { return /^gemini-[\d.]+-flash/.test(n) && !/(lite|image|tts|audio|live|thinking|embedding)/.test(n); });
-  const ver = function (n) { return parseFloat(n.match(/^gemini-([\d.]+)/)[1]); };
-  const stable = models.filter(function (n) { return !/(preview|exp)/.test(n); });
-  const pool = (stable.length ? stable : models).sort(function (a, b) { return ver(b) - ver(a) || a.length - b.length; });
-  if (!pool.length) throw new Error('Không tìm thấy model Gemini flash phù hợp');
-  props.setProperty('AUTO_MODEL', pool[0]);
-  return pool[0];
+  const cached = props.getProperty('AUTO_MODELS');
+  let auto = cached ? JSON.parse(cached) : null;
+  if (!auto) {
+    const res = UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=' + key, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw new Error('Không lấy được danh sách model Gemini: ' + res.getContentText().slice(0, 200));
+    const names = (JSON.parse(res.getContentText()).models || [])
+      .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf('generateContent') >= 0; })
+      .map(function (m) { return m.name.replace('models/', ''); })
+      .filter(function (n) { return /^gemini-[\d.]+-flash/.test(n) && !/(image|tts|audio|live|thinking|embedding)/.test(n); });
+    const ver = function (n) { return parseFloat(n.match(/^gemini-([\d.]+)/)[1]); };
+    const rank = function (n) { return (/lite/.test(n) ? 2 : 0) + (/(preview|exp)/.test(n) ? 1 : 0); };
+    auto = names.sort(function (a, b) { return rank(a) - rank(b) || ver(b) - ver(a) || a.length - b.length; }).slice(0, 6);
+    if (!auto.length) throw new Error('Không tìm thấy model Gemini flash phù hợp');
+    props.setProperty('AUTO_MODELS', JSON.stringify(auto));
+  }
+  return fixed ? [fixed].concat(auto.filter(function (m) { return m !== fixed; })) : auto;
 }
 
 function json_(obj) {
@@ -144,6 +158,8 @@ function json_(obj) {
 
 // Chạy thử trong trình soạn thảo Apps Script để xem model được chọn.
 function testModel() {
-  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  Logger.log(pickModel_(key));
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty('AUTO_MODELS');
+  props.deleteProperty('AUTO_MODEL');
+  Logger.log(pickModels_(props.getProperty('GEMINI_API_KEY')).join('\n'));
 }
