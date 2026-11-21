@@ -1,5 +1,5 @@
 // Service worker: lưu vỏ app để mở được khi offline. Sách lưu riêng trong bộ nhớ của app (OPFS), không qua đây.
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.0.1';
 const SHELL = `shell-${VERSION}`;
 const VENDOR = 'vendor-pdfjs-6.5.438';
 
@@ -13,7 +13,7 @@ const VENDOR_FILES = ['./vendor/pdfjs/pdf.min.mjs', './vendor/pdfjs/pdf.worker.m
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
-    await (await caches.open(SHELL)).addAll(SHELL_FILES);
+    await (await caches.open(SHELL)).addAll(SHELL_FILES.map((u) => new Request(u, { cache: 'reload' })));
     await (await caches.open(VENDOR)).addAll(VENDOR_FILES);
     self.skipWaiting();
   })());

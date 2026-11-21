@@ -1,6 +1,7 @@
 // Lưu sách offline (OPFS; dự phòng IndexedDB) + hàng đợi tải có nhận biết loại mạng.
 import { db } from './db.js';
-import { fetchMedia, AuthError } from './drive.js';
+import { fetchMedia, readRange, AuthError } from './drive.js';
+import { CONFIG } from './config.js';
 
 // ---------- Loại mạng ----------
 // 'wifi' | 'cellular' | 'offline'. Trình duyệt máy tính thường không báo loại mạng -> coi như Wi-Fi.
@@ -140,13 +141,16 @@ async function pump() {
   if (nt === 'offline') { st.status = 'paused'; emit(); return pump(); }
   if (nt === 'cellular' && !st.cellularOk) { st.status = 'waiting-wifi'; emit(); return pump(); }
   running = book.id;
+  if (await localFile(book.id)) { st.status = 'done'; running = null; emit(); return pump(); }
   st.status = 'downloading';
   st.ctrl = new AbortController();
   st.abortReason = null;
   emit();
   try {
     if (opfsWritable === null) opfsWritable = await canWriteOPFS();
-    await (opfsWritable ? downloadOPFS(book, st) : downloadIDB(book, st));
+    if (!opfsWritable) await downloadIDB(book, st);
+    else if (book.size) await downloadParallel(book, st);
+    else await downloadOPFS(book, st);
     st.status = 'done';
   } catch (e) {
     if (e.name === 'AbortError') st.status = st.abortReason || 'paused';
@@ -184,6 +188,68 @@ async function downloadOPFS(book, st) {
   }
   const f = await fh.getFile();
   if (book.size && f.size !== book.size) throw new Error('File tải về không đủ dung lượng');
+  await db.set('kv', `local:${book.id}`, { size: f.size, at: Date.now(), where: 'opfs' });
+}
+
+// Tải song song nhiều khối (mặc định 4 luồng × 8 MB), ghi thẳng vào đúng vị trí trong file.
+// Khối nào xong được ghi nhận khi lưu file, nên bị ngắt giữa chừng thì lần sau chỉ tải các khối còn thiếu.
+async function downloadParallel(book, st) {
+  const total = book.size;
+  const SEG = CONFIG.dlSegment;
+  const segCount = Math.ceil(total / SEG);
+  const d = await booksDir();
+  const fh = await d.getFileHandle(`${book.id}.pdf`, { create: true });
+  const segKey = `dlseg:${book.id}`;
+  let done = new Set((await db.get('kv', segKey))?.done || []);
+  if ((await fh.getFile()).size !== total) done = new Set();
+  const w = await fh.createWritable({ keepExistingData: done.size > 0 });
+  if (!done.size) await w.truncate(total);
+  const segLen = (i) => Math.min(total, (i + 1) * SEG) - i * SEG;
+  st.received = [...done].reduce((a, i) => a + segLen(i), 0);
+  emit();
+
+  const pending = [];
+  for (let i = 0; i < segCount; i += 1) if (!done.has(i)) pending.push(i);
+  let next = 0;
+  let firstErr = null;
+  const worker = async () => {
+    while (next < pending.length && !firstErr) {
+      const i = pending[next++];
+      const start = i * SEG;
+      const end = start + segLen(i);
+      let buf = null;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          buf = await readRange(book.id, start, end, st.ctrl.signal);
+          if (buf.byteLength !== end - start) throw new Error('Khối tải về bị thiếu');
+          break;
+        } catch (e) {
+          if (e.name === 'AbortError' || e instanceof AuthError || attempt >= 2) throw e;
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        }
+      }
+      await w.write({ type: 'write', position: start, data: buf });
+      done.add(i);
+      st.received += buf.byteLength;
+      emit();
+    }
+  };
+  const results = await Promise.allSettled(
+    Array.from({ length: Math.min(CONFIG.dlParallel, pending.length) }, () => worker().catch((e) => {
+      if (!firstErr) { firstErr = e; if (e.name !== 'AbortError') st.ctrl.abort(); }
+      throw e;
+    })),
+  );
+  await w.close().catch(() => {}); // lưu các khối đã tải xong
+  if (firstErr || results.some((r) => r.status === 'rejected')) {
+    await db.set('kv', segKey, { done: [...done] });
+    const err = firstErr || results.find((r) => r.status === 'rejected').reason;
+    // Lỗi gốc là lỗi mạng mà các luồng khác bị huỷ theo: vẫn báo lỗi gốc.
+    throw err;
+  }
+  await db.del('kv', segKey);
+  const f = await fh.getFile();
+  if (f.size !== total) throw new Error('File tải về không đủ dung lượng');
   await db.set('kv', `local:${book.id}`, { size: f.size, at: Date.now(), where: 'opfs' });
 }
 

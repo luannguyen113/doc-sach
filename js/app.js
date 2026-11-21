@@ -35,7 +35,15 @@ const S = {
 
 // ---------------- Khởi động ----------------
 async function boot() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    // Có bản app mới: tự tải lại khi đang ở thư viện (không cắt ngang lúc đang đọc).
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) return;
+      if (!S.reader) location.reload(); else S.pendingReload = true;
+    });
+  }
   const [settings, lib, progressEntries, sessions, local] = await Promise.all([
     db.get('kv', 'settings'), db.get('kv', 'library'), db.entries('progress'), db.all('sessions'), localIds(),
   ]);
@@ -608,7 +616,16 @@ async function openBook(id) {
     reader.showMsg('Cần kết nối lại Google Drive để mở sách chưa tải.', 'Kết nối lại', async () => { await signIn(); closeReader(); openBook(id); });
     return;
   } else {
-    src = { length: b.size, read: (s, e) => readRange(b.id, s, e), chunk: CONFIG.remoteChunk };
+    // Khi bản offline tải xong thì chuyển sang đọc từ máy, không gọi mạng nữa.
+    let localF = null;
+    src = {
+      length: b.size,
+      chunk: CONFIG.remoteChunk,
+      read: async (s, e) => {
+        if (!localF && S.local.has(id)) localF = await localFile(id);
+        return localF ? localF.slice(s, e).arrayBuffer() : readRange(b.id, s, e);
+      },
+    };
     // Wi-Fi: đọc ngay và tải trọn file ngầm. 4G: chỉ lấy các trang đang đọc.
     const nt = netType();
     const series = x.series;
@@ -677,6 +694,7 @@ function closeReader() {
   S.readingId = null;
   syncNow().catch(() => {});
   runPolicy();
+  if (S.pendingReload) setTimeout(() => location.reload(), 300);
 }
 
 // ---------------- Sự kiện ----------------

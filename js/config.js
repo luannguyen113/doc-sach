@@ -1,5 +1,5 @@
 export const CONFIG = {
-  version: '1.0.0',
+  version: '1.0.1',
   clientId: '878030336042-18q2nhn7ihp8i42galb3gljgtf45uib4.apps.googleusercontent.com',
   scopes: [
     'https://www.googleapis.com/auth/drive.readonly',
@@ -14,4 +14,7 @@ export const CONFIG = {
   maxReading: 3,
   remoteChunk: 1 << 20, // 1 MB mỗi lần đọc từng phần qua mạng
   localChunk: 1 << 20,
+  // Tải offline: chia file thành khối 8 MB, tải 4 khối song song.
+  dlSegment: 8 << 20,
+  dlParallel: 4,
 };
