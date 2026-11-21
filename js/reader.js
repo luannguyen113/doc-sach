@@ -57,6 +57,7 @@ export class Reader {
     const o = this.o;
     this.host.innerHTML = `
       <div class="rd" data-kind="${o.kind}" data-dir="${o.dir}">
+        <div class="rd-head">
         <header class="rd-top">
           <a class="icon-btn" href="#/" aria-label="Về thư viện">${icon('back')}</a>
           <div class="rd-title"><strong>${esc(o.title)}</strong><span class="rd-sub">${esc(o.subtitle || '')}</span></div>
@@ -77,16 +78,19 @@ export class Reader {
             <button type="button" data-layout="double">2 trang</button>
           </div>
           <label class="switch-row"><span>Trang bìa đứng riêng khi xem 2 trang</span><input type="checkbox" class="rd-cover"></label>
+          <button type="button" class="btn ghost rd-goto-btn">Tới trang…</button>
+        </div>
         </div>
         <div class="rd-stage" tabindex="0" aria-label="Trang sách">
           <div class="rd-spread"></div>
           <div class="rd-msg" hidden><p></p><button type="button" class="btn"></button></div>
         </div>
+        <div class="rd-mini tnum" aria-hidden="true"></div>
         <footer class="rd-bottom">
           <button type="button" class="nav-btn rd-left"></button>
           <div class="rd-mid">
             <input type="range" class="rd-slider" min="1" max="1" value="1" aria-label="Đến trang">
-            <span class="rd-label tnum"></span>
+            <button type="button" class="rd-label tnum" aria-label="Tới trang"></button>
           </div>
           <button type="button" class="nav-btn rd-right"></button>
         </footer>
@@ -99,6 +103,9 @@ export class Reader {
     this.sub = $('.rd-sub');
     this.slider = $('.rd-slider');
     this.label = $('.rd-label');
+    this.mini = $('.rd-mini');
+    this.head = $('.rd-head');
+    this.foot = $('.rd-bottom');
     this.panel = $('.rd-panel');
     this.btnLeft = $('.rd-left');
     this.btnRight = $('.rd-right');
@@ -170,6 +177,7 @@ export class Reader {
     this.hideMsg();
     this.bind();
     await this.display(true);
+    this.showChrome(2500);
   }
 
   // ---------- Bố cục ----------
@@ -294,7 +302,61 @@ export class Reader {
     const b = spread[spread.length - 1];
     const pct = Math.round((b / this.total) * 100);
     this.label.textContent = `${a === b ? a : `${a}–${b}`} / ${this.total} · ${pct}%`;
+    this.mini.textContent = `${a === b ? a : `${a}–${b}`} / ${this.total}`;
     this.slider.value = String(a);
+  }
+
+  // ---------- Thanh trên/dưới tự ẩn ----------
+  // Ẩn khi đọc để trang được hiển thị tối đa; chạm giữa màn hình để hiện lại, tự ẩn sau 4 giây không thao tác.
+  showChrome(ms = 4000) {
+    this.root.classList.remove('immersive');
+    this.armHide(ms);
+  }
+  hideChrome() {
+    if (!this.panel.hidden || this.dragging || !this.msgEl.hidden) return;
+    clearTimeout(this.hideTimer);
+    this.root.classList.add('immersive');
+  }
+  armHide(ms = 4000) {
+    clearTimeout(this.hideTimer);
+    this.hideTimer = setTimeout(() => this.hideChrome(), ms);
+  }
+
+  // ---------- Tới trang ----------
+  openGoto() {
+    document.querySelector('dialog.rd-goto')?.remove();
+    const cur = this.spreadFor(this.page);
+    const dlg = document.createElement('dialog');
+    dlg.className = 'sheet rd-goto';
+    dlg.setAttribute('aria-label', 'Tới trang');
+    dlg.innerHTML = `
+      <form class="sheet-body" novalidate>
+        <h2 class="sheet-title">Tới trang</h2>
+        <p class="muted sm">Đang ở trang <span class="tnum">${cur.join('–')} / ${this.total}</span></p>
+        <label for="rd-goto-in">Số trang (1–${this.total})</label>
+        <input id="rd-goto-in" type="number" inputmode="numeric" min="1" max="${this.total}" autocomplete="off" enterkeyhint="go">
+        <p class="muted xs">Số trang theo thứ tự trong file PDF, có thể lệch vài trang so với số in trên trang sách.</p>
+        <p class="form-err" role="alert"></p>
+        <div class="sheet-actions">
+          <button type="button" class="btn ghost" data-x="cancel">Huỷ</button>
+          <button type="submit" class="btn primary">Đi</button>
+        </div>
+      </form>`;
+    document.body.appendChild(dlg);
+    const input = dlg.querySelector('#rd-goto-in');
+    dlg.querySelector('[data-x="cancel"]').onclick = () => dlg.close();
+    dlg.querySelector('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const n = parseInt(input.value, 10);
+      if (!(n >= 1 && n <= this.total)) { dlg.querySelector('.form-err').textContent = `Nhập số từ 1 đến ${this.total}.`; input.focus(); return; }
+      dlg.close();
+      this.panel.hidden = true;
+      this.btnMore.setAttribute('aria-expanded', 'false');
+      this.goTo(n);
+    });
+    dlg.addEventListener('close', () => { dlg.remove(); this.stage.focus({ preventScroll: true }); });
+    dlg.showModal();
+    input.focus();
   }
 
   // ---------- Điều hướng ----------
@@ -312,7 +374,8 @@ export class Reader {
     this.afterMove();
   }
   afterMove() {
-    if (this.z !== 1) { this.z = 1; this.applyChrome(); }
+    if (this.z !== 1) { this.z = 1; this.root.classList.remove('zoomed'); this.applyChrome(); }
+    this.hideChrome();
     this.o.onActivity?.();
     this.display(true);
   }
@@ -355,7 +418,16 @@ export class Reader {
     this.btnMore.addEventListener('click', () => {
       this.panel.hidden = !this.panel.hidden;
       this.btnMore.setAttribute('aria-expanded', String(!this.panel.hidden));
+      if (this.panel.hidden) this.armHide(); else clearTimeout(this.hideTimer);
     }, sig);
+    this.label.addEventListener('click', () => this.openGoto(), sig);
+    this.root.querySelector('.rd-goto-btn').addEventListener('click', () => this.openGoto(), sig);
+    // Đang thao tác trên thanh thì không tự ẩn
+    for (const el of [this.head, this.foot]) {
+      el.addEventListener('pointerdown', () => { if (this.panel.hidden) this.armHide(6000); }, sig);
+    }
+    this.slider.addEventListener('pointerdown', () => { this.dragging = true; clearTimeout(this.hideTimer); }, sig);
+    window.addEventListener('pointerup', () => { if (this.dragging) { this.dragging = false; this.armHide(); } }, sig);
     this.panel.addEventListener('click', (e) => {
       const b = e.target.closest('button');
       if (!b) return;
@@ -410,7 +482,9 @@ export class Reader {
       lastTap = now;
       tapTimer = setTimeout(() => {
         const zone = cx / rect.width;
-        if (this.z > 1 || pinched || (zone > 0.3 && zone < 0.7)) this.root.classList.toggle('immersive');
+        if (this.z > 1 || pinched || (zone > 0.3 && zone < 0.7)) {
+          if (this.root.classList.contains('immersive')) this.showChrome(); else this.hideChrome();
+        }
         else if (zone <= 0.3) this.left();
         else this.right();
       }, 260);
@@ -418,6 +492,8 @@ export class Reader {
 
     window.addEventListener('keydown', (e) => {
       if (e.target.closest?.('input, textarea')) return;
+      if (e.target.closest?.('dialog')) return;
+      if (e.key === 'g' || e.key === 'G') { e.preventDefault(); this.openGoto(); return; }
       if (e.key === 'ArrowLeft') { e.preventDefault(); this.left(); }
       else if (e.key === 'ArrowRight') { e.preventDefault(); this.right(); }
       else if (e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); this.next(); }
@@ -445,6 +521,8 @@ export class Reader {
 
   close() {
     this.closed = true;
+    clearTimeout(this.hideTimer);
+    document.querySelector('dialog.rd-goto')?.remove();
     this.ac?.abort();
     this.ro?.disconnect();
     this.cache.forEach((p) => p.then((c) => { c.width = 0; c.height = 0; }).catch(() => {}));
