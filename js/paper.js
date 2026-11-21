@@ -89,26 +89,40 @@ async function gem(path, key, opts = {}) {
   return fetch(`${GEMINI}/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`, opts);
 }
 
-// Chọn tối đa 3 model để gửi song song: 2.5-flash, 2.5-flash-lite (đã ổn định) + bản flash mới nhất. Lưu danh sách 1 ngày.
+// Danh sách model ứng viên (bản flash ổn định, mới trước; xen kẽ flash và flash-lite). Lưu 1 ngày.
+// Model nào báo 404 (Google đã ngừng cấp) thì ghi lại và bỏ qua trong 7 ngày.
 export async function pickGeminiModels(key, { force = false } = {}) {
+  const dead = (await db.get('kv', 'geminiDead')) || {};
+  const alive = (list) => list.filter((m) => !(dead[m] && Date.now() - dead[m] < 7 * 864e5));
   const cached = await db.get('kv', 'geminiModels');
-  if (!force && cached && cached.key === key.slice(-6) && Date.now() - cached.at < 864e5) return cached.models;
+  if (!force && cached && cached.key === key.slice(-6) && Date.now() - cached.at < 864e5) return alive(cached.models);
   const res = await gem('models?pageSize=200', key);
   if (res.status === 400 || res.status === 403) throw new Error('Gemini API key không hợp lệ hoặc chưa được phép dùng từ app này');
   if (!res.ok) throw new Error(`Không lấy được danh sách model Gemini (lỗi ${res.status})`);
   const names = ((await res.json()).models || [])
     .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
     .map((m) => m.name.replace('models/', ''))
-    .filter((n) => /^gemini-[\d.]+-flash/.test(n) && !/(image|tts|audio|live|thinking|embedding|preview|exp)/.test(n));
+    .filter((n) => /^gemini-[\d.]+-flash/.test(n) && !/(image|tts|audio|live|thinking|embedding)/.test(n));
   const ver = (n) => parseFloat(n.match(/^gemini-([\d.]+)/)[1]);
-  const pick = [];
-  for (const want of ['gemini-2.5-flash', 'gemini-2.5-flash-lite']) if (names.includes(want)) pick.push(want);
-  const newest = names.filter((n) => !/lite/.test(n) && !pick.includes(n)).sort((a, b) => ver(b) - ver(a) || a.length - b.length)[0];
-  if (newest) pick.push(newest);
-  for (const n of names.sort((a, b) => ver(b) - ver(a))) if (pick.length < 3 && !pick.includes(n)) pick.push(n);
-  if (!pick.length) throw new Error('Không tìm thấy model Gemini flash phù hợp');
-  await db.set('kv', 'geminiModels', { key: key.slice(-6), at: Date.now(), models: pick });
-  return pick;
+  const byVer = (a, b) => ver(b) - ver(a) || a.length - b.length;
+  const stable = names.filter((n) => !/(preview|exp)/.test(n));
+  const flash = stable.filter((n) => !/lite/.test(n)).sort(byVer);
+  const lite = stable.filter((n) => /lite/.test(n)).sort(byVer);
+  const order = [];
+  for (let i = 0; i < Math.max(flash.length, lite.length); i += 1) {
+    if (flash[i]) order.push(flash[i]);
+    if (lite[i]) order.push(lite[i]);
+  }
+  order.push(...names.filter((n) => /(preview|exp)/.test(n)).sort(byVer));
+  if (!order.length) throw new Error('Không tìm thấy model Gemini flash phù hợp');
+  await db.set('kv', 'geminiModels', { key: key.slice(-6), at: Date.now(), models: order });
+  return alive(order);
+}
+
+async function markDead(model) {
+  const dead = (await db.get('kv', 'geminiDead')) || {};
+  dead[model] = Date.now();
+  await db.set('kv', 'geminiDead', dead);
 }
 
 async function askModel(model, key, b64, outerSignal) {
@@ -145,25 +159,49 @@ async function askModel(model, key, b64, outerSignal) {
   }
 }
 
-// Gửi cùng lúc tới các model, lấy kết quả đầu tiên, huỷ phần còn lại.
+// Chạy song song tối đa 3 model; model nào lỗi thì lập tức thay bằng model kế tiếp; lấy kết quả đầu tiên.
+const PARALLEL = 3;
+const DEADLINE = 30_000;
+
 export async function readCoverText(key, imageBlob) {
   if (!key) throw new Error('Chưa nhập Gemini API key (vào Cài đặt để nhập)');
   if (!navigator.onLine) throw new Error('Đang offline, chưa đọc được ảnh bìa');
   const models = await pickGeminiModels(key);
+  if (!models.length) { await db.del('kv', 'geminiDead'); throw new Error('Không còn model Gemini nào dùng được, thử lại để app lấy danh sách mới.'); }
   const b64 = await toBase64(imageBlob);
   const all = new AbortController();
+  const start = Date.now();
+  const notes = [];
   try {
-    const r = await Promise.any(models.map((m) => askModel(m, key, b64, all.signal)));
-    return r;
-  } catch (agg) {
-    const errs = agg.errors || [agg];
-    if (errs.some((e) => e.status === 400 || e.status === 403)) {
-      await db.del('kv', 'geminiModels');
-      throw new Error(errs.find((e) => e.status === 400 || e.status === 403).message);
-    }
-    if (errs.every((e) => e.status === 'timeout')) throw new Error('Gemini quá 20 giây chưa trả lời. Thử lại sau hoặc nhập tay.');
-    if (errs.some((e) => e.status === 503 || e.status === 429)) throw new Error('Gemini đang quá tải. Thử lại sau ít phút hoặc nhập tay.');
-    throw new Error(errs[0]?.message || 'Không đọc được ảnh bìa');
+    return await new Promise((resolve, reject) => {
+      let next = 0;
+      let active = 0;
+      let done = false;
+      const finishFail = () => { if (!done && active === 0) { done = true; reject(notes); } };
+      const launch = () => {
+        while (!done && active < PARALLEL && next < models.length && Date.now() - start < DEADLINE) {
+          const m = models[next++];
+          active += 1;
+          askModel(m, key, b64, all.signal).then((r) => {
+            if (!done) { done = true; resolve(r); }
+          }).catch(async (e) => {
+            active -= 1;
+            notes.push(`${m.replace('gemini-', '')}: ${e.status === 'timeout' ? 'quá 20s' : e.status || 'lỗi'}`);
+            if (e.status === 404) await markDead(m);
+            if (e.status === 400 || e.status === 403) { if (!done) { done = true; reject(e); } return; }
+            launch();
+            finishFail();
+          });
+        }
+        finishFail();
+      };
+      launch();
+    });
+  } catch (err) {
+    if (err instanceof Error) { await db.del('kv', 'geminiModels'); throw err; }
+    const list = err.join(' · ');
+    if (err.length && err.every((x) => /quá 20s|503|429/.test(x))) throw new Error(`Gemini đang quá tải (${list}). Thử lại sau hoặc nhập tay.`);
+    throw new Error(`Không đọc được ảnh bìa (${list})`);
   } finally {
     all.abort();
   }
