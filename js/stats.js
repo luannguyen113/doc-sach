@@ -102,8 +102,20 @@ export function computeStats({ sessions, progress, books, articles, paper = {}, 
   }
 
   // Bài viết trong kỳ
-  const arts = Object.values(articles || {}).filter((a) => !a.deleted && inRange(a.readAt, r.start, r.end + 1));
-  const prevArts = Object.values(articles || {}).filter((a) => !a.deleted && inRange(a.readAt, r.prevStart, r.prevEnd + 1));
+  // Podcast nằm chung danh sách Bài viết nhưng thống kê riêng; cả hai đều không tính vào streak.
+  const inWin = (a, x, y) => !a.deleted && inRange(a.readAt, x, y);
+  const allArt = Object.values(articles || {});
+  const arts = allArt.filter((a) => a.kind !== 'podcast' && inWin(a, r.start, r.end + 1));
+  const prevArts = allArt.filter((a) => a.kind !== 'podcast' && inWin(a, r.prevStart, r.prevEnd + 1));
+  const pods = allArt.filter((a) => a.kind === 'podcast' && inWin(a, r.start, r.end + 1));
+  const prevPods = allArt.filter((a) => a.kind === 'podcast' && inWin(a, r.prevStart, r.prevEnd + 1));
+  const podMin = pods.reduce((t, a) => t + (a.minutes || 0), 0);
+  const podShows = new Map();
+  for (const a of pods) {
+    const k = a.source || 'Spotify';
+    const v = podShows.get(k) || { n: 0, min: 0 };
+    podShows.set(k, { n: v.n + 1, min: v.min + (a.minutes || 0) });
+  }
   const count = (key) => {
     const m = new Map();
     for (const a of arts) for (const v of key(a)) m.set(v, (m.get(v) || 0) + 1);
@@ -114,6 +126,8 @@ export function computeStats({ sessions, progress, books, articles, paper = {}, 
   return {
     period, r, cur, prev, streak, longest, completed, genreList, cells, daily,
     arts: arts.length, prevArts: prevArts.length,
+    pods: pods.length, prevPods: prevPods.length, podMin, podNoMin: pods.filter((a) => !a.minutes).length,
+    byShow: [...podShows.entries()].sort((a, b) => b[1].min - a[1].min || b[1].n - a[1].n),
     byTag: count((a) => (a.tags?.length ? a.tags : ['(chưa có tag)'])),
     bySource: count((a) => [a.source || 'khác']),
     last,
@@ -170,6 +184,8 @@ export function renderStatsHtml(st, { readingRows }) {
   const pastDays = st.cells.filter((c) => !c.future).length;
 
   const artCmp = compare(st.arts, st.prevArts, (n) => `${n} bài`, P.prev);
+  const podCmp = compare(st.pods, st.prevPods, (n) => `${n} tập`, P.prev);
+  const podDur = st.podMin >= 60 ? `${nf1(st.podMin / 60)} giờ` : `${st.podMin} phút`;
   const list = (rows) => rows.slice(0, 8).map(([k, n]) => `<li><span>${esc(k)}</span><span class="tnum muted">${n}</span></li>`).join('');
 
   return `
@@ -186,6 +202,7 @@ export function renderStatsHtml(st, { readingRows }) {
         <div class="card kpi"><span class="big tnum">${st.cur.count}</span><span class="muted xs">phiên · TB ${avg} phút</span></div>
         <div class="card kpi"><span class="big tnum">${st.completed}</span><span class="muted xs">tập/cuốn hoàn thành</span></div>
         <div class="card kpi"><span class="big tnum">${st.arts}</span><span class="muted xs">bài viết đã đọc</span></div>
+        ${st.pods ? `<div class="card kpi"><span class="big tnum">${st.pods}</span><span class="muted xs">tập podcast · ${podDur}</span></div>` : ''}
       </section>
       ${timeLine ? `<p class="read">${timeLine}</p>` : ''}
 
@@ -216,6 +233,15 @@ export function renderStatsHtml(st, { readingRows }) {
             <p class="read">${st.arts} bài. ${artCmp}</p>` : '<p class="muted sm">Chưa có bài viết nào trong kỳ này.</p>'}
           <p class="muted xs">Bài viết không tính vào streak vì app không đo được thời gian đọc trong Substack.</p>
         </section>
+        ${st.pods ? `
+        <section class="card" aria-label="Podcast">
+          <h2 class="h3">Podcast · ${P.label.toLowerCase()}</h2>
+          <p class="muted xs">Theo chương trình</p>
+          <ul class="rank">${st.byShow.slice(0, 8).map(([k, v]) => `<li><span>${esc(k)}</span><span class="tnum muted">${v.n} tập${v.min ? ` · ${v.min} phút` : ''}</span></li>`).join('')}</ul>
+          <p class="read">${st.pods} tập, ${podDur} nghe. ${podCmp}</p>
+          ${st.podNoMin ? `<p class="muted xs">${st.podNoMin} tập chưa có số phút nên chưa cộng vào giờ nghe.</p>` : ''}
+          <p class="muted xs">Giờ nghe podcast tính riêng, không cộng vào giờ đọc và streak.</p>
+        </section>` : ''}
       </div>
     </main>`;
 }

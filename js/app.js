@@ -12,8 +12,9 @@ import { Reader } from './reader.js';
 import { esc, icon, fmtMB, fmtTime, dayKey, toast, parseName } from './ui.js';
 import {
   loadArticles, upsertArticle, deleteArticle, restoreArticle, activeList, tagCounts,
-  extractUrl, cleanUrl, titleFromUrl, normTag,
+  extractUrl, cleanUrl, titleFromUrl, normTag, isPodcastUrl, isPodcast, showNames,
 } from './articles.js';
+import { spotifyOembed, readPodcastPage } from './podcast.js';
 import { computeStats, renderStatsHtml } from './stats.js';
 import {
   loadHighlights, saveHighlight, deleteHighlight, restoreHighlight, activeHighlights, highlightsOf, groupByBook,
@@ -46,6 +47,7 @@ const S = {
   articles: {},
   artTag: '',
   artQuery: '',
+  artKind: '', // '' = tất cả · 'post' = bài viết · 'podcast'
   statsPeriod: 'month',
   paper: {},
   highlights: {},
@@ -1000,16 +1002,19 @@ function fmtDate(ts) {
 function filteredArticles() {
   const q = S.artQuery.trim().toLowerCase();
   return activeList(S.articles).filter((a) => (!S.artTag || a.tags.includes(S.artTag))
+    && (!S.artKind || (S.artKind === 'podcast') === isPodcast(a))
     && (!q || a.title.toLowerCase().includes(q) || a.source.toLowerCase().includes(q)));
 }
 
 // Đầu màn Ghi chép (mở luôn thẻ <main>), dùng chung cho 2 mục Bài viết | Highlight.
 function notesHead(seg) {
   S.notesSeg = seg;
-  const nArt = activeList(S.articles).length;
+  const allArt = activeList(S.articles);
+  const nPod = allArt.filter(isPodcast).length;
+  const nArt = allArt.length - nPod;
   const nHl = activeHighlights(S.highlights).length;
   return `
-      <header class="top"><div><h1>Ghi chép</h1><span class="muted sm tnum">${nArt} bài đã đọc · ${nHl} highlight</span></div></header>
+      <header class="top"><div><h1>Ghi chép</h1><span class="muted sm tnum">${nArt} bài đã đọc${nPod ? ` · ${nPod} podcast` : ''} · ${nHl} highlight</span></div></header>
       <main class="main">
         <nav class="seg-tabs notes-seg" aria-label="Loại ghi chép">
           <a href="#/articles" class="${seg === 'art' ? 'on' : ''}" ${seg === 'art' ? 'aria-current="page"' : ''}>Bài viết</a>
@@ -1025,23 +1030,27 @@ function renderArticles() {
     <div class="page">
       ${notesHead('art')}
         <section class="card form" aria-label="Thêm bài đã đọc">
-          <label for="art-url">Thêm bài đã đọc</label>
+          <label for="art-url">Thêm bài đã đọc / podcast đã nghe</label>
           <div class="inline">
-            <input id="art-url" type="url" inputmode="url" placeholder="Dán link bài viết" autocomplete="off">
+            <input id="art-url" type="url" inputmode="url" placeholder="Dán link bài viết hoặc tập Spotify" autocomplete="off">
             <button type="button" class="btn primary" data-action="art-add">Thêm</button>
           </div>
-          <p class="muted xs">Trên điện thoại: trong app Substack bấm <strong>Chia sẻ → Đọc sách</strong>.</p>
+          <p class="muted xs">Trên điện thoại: trong app Substack hoặc Spotify bấm <strong>Chia sẻ → Đọc sách</strong>.</p>
         </section>
         ${all.length ? `
         <section class="art-tools" aria-label="Lọc bài viết">
-          <input id="art-q" type="search" placeholder="Tìm theo tiêu đề hoặc nguồn" value="${esc(S.artQuery)}" autocomplete="off" aria-label="Tìm bài viết">
+          <input id="art-q" type="search" placeholder="Tìm theo tiêu đề, nguồn, chương trình" value="${esc(S.artQuery)}" autocomplete="off" aria-label="Tìm bài viết">
+          ${all.some(isPodcast) ? `<div class="tagbar" role="group" aria-label="Lọc theo loại">
+            ${[['', 'Tất cả', all.length], ['post', 'Bài viết', all.filter((a) => !isPodcast(a)).length], ['podcast', '🎧 Podcast', all.filter(isPodcast).length]]
+              .map(([k, l, n]) => `<button type="button" class="tag ${S.artKind === k ? 'on' : ''}" data-action="art-kind" data-kind="${k}" aria-pressed="${S.artKind === k}">${l} <span class="tnum">${n}</span></button>`).join('')}
+          </div>` : ''}
           <div class="tagbar" role="group" aria-label="Lọc theo tag">
-            <button type="button" class="tag ${S.artTag ? '' : 'on'}" data-action="art-tag" data-tag="" aria-pressed="${!S.artTag}">Tất cả <span class="tnum">${all.length}</span></button>
+            <button type="button" class="tag ${S.artTag ? '' : 'on'}" data-action="art-tag" data-tag="" aria-pressed="${!S.artTag}">Mọi tag</button>
             ${tags.map(([t, n]) => `<button type="button" class="tag ${S.artTag === t ? 'on' : ''}" data-action="art-tag" data-tag="${esc(t)}" aria-pressed="${S.artTag === t}">${esc(t)} <span class="tnum">${n}</span></button>`).join('')}
           </div>
         </section>
         <section class="list" id="art-list" aria-label="Danh sách bài viết">${artListHtml()}</section>` : `
-        <div class="card empty"><p>Chưa có bài nào. Đọc xong một bài trên Substack thì chia sẻ vào đây hoặc dán link ở trên.</p></div>`}
+        <div class="card empty"><p>Chưa có gì. Đọc xong một bài trên Substack hoặc nghe xong một tập trên Spotify thì chia sẻ vào đây, hoặc dán link ở trên.</p></div>`}
       </main>
       ${nav('art')}
     </div>`;
@@ -1051,10 +1060,15 @@ function artListHtml() {
   const list = filteredArticles();
   if (!list.length) return '<p class="muted sm">Không có bài nào khớp.</p>';
   return list.map((a) => `
-    <article class="card art">
+    <article class="card art${isPodcast(a) ? ' pod' : ''}">
       <a class="art-link" href="${esc(a.url)}" target="_blank" rel="noopener">
-        <span class="t2">${esc(a.title)}</span>
-        <span class="muted xs">${esc(a.source)} · đọc ${fmtDate(a.readAt)}</span>
+        ${isPodcast(a) ? `<span class="pod-cover" aria-hidden="true">${a.cover ? `<img src="${esc(a.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '🎧'}</span>` : ''}
+        <span class="art-text">
+          <span class="t2">${esc(a.title)}</span>
+          <span class="muted xs">${isPodcast(a)
+            ? `🎧 ${esc(a.source)}${a.minutes ? ` · <span class="tnum">${a.minutes}</span> phút` : ''} · nghe ${fmtDate(a.readAt)}`
+            : `${esc(a.source)} · đọc ${fmtDate(a.readAt)}`}</span>
+        </span>
       </a>
       <div class="art-foot">
         <div class="tags">${a.tags.map((t) => `<button type="button" class="tag sm" data-action="art-tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('') || '<span class="muted xs">Chưa có tag</span>'}</div>
@@ -1075,22 +1089,36 @@ function addFromInput() {
 
 // Hộp sửa: tiêu đề + tag (gõ rồi Enter hoặc dấu phẩy để thêm; chạm gợi ý để thêm nhanh).
 function openArticleEditor({ url, title }) {
+  if (/^https?:\/\/spotify\.link\//i.test(String(url))) { toast('Link rút gọn spotify.link: mở link trong trình duyệt rồi dán link open.spotify.com'); return; }
   const id = cleanUrl(url);
   if (!id) { toast('Link không hợp lệ'); return; }
+  const pod = isPodcastUrl(id);
   const prev = S.articles[id] && !S.articles[id].deleted ? S.articles[id] : null;
+  // Spotify khi chia sẻ thường gửi kèm câu chào chứ không phải tên tập → bỏ, để tự lấy.
+  if (pod && title && /spotify|listen to|nghe tập|check out/i.test(title)) title = '';
   let tags = prev ? [...prev.tags] : [];
   const allTags = tagCounts(activeList(S.articles)).map(([t]) => t);
   document.querySelector('dialog.sheet')?.remove();
   const dlg = document.createElement('dialog');
   dlg.className = 'sheet';
-  dlg.setAttribute('aria-label', 'Lưu bài đã đọc');
+  const noun = pod ? 'tập podcast đã nghe' : 'bài đã đọc';
+  const shows = showNames(activeList(S.articles));
+  let cover = prev?.cover || '';
+  dlg.setAttribute('aria-label', `Lưu ${noun}`);
   dlg.innerHTML = `
     <form method="dialog" class="sheet-body">
-      <h2 class="sheet-title">${prev ? 'Sửa bài đã đọc' : 'Lưu bài đã đọc'}</h2>
-      ${prev ? '<p class="muted xs">Bài này đã có trong danh sách.</p>' : ''}
-      <p class="muted xs url-line">${esc(id)}</p>
-      <label for="art-title">Tiêu đề</label>
-      <input id="art-title" type="text" value="${esc(title || prev?.title || titleFromUrl(id))}" autocomplete="off">
+      <h2 class="sheet-title">${prev ? `Sửa ${noun}` : `Lưu ${noun}`}</h2>
+      ${prev ? `<p class="muted xs">${pod ? 'Tập' : 'Bài'} này đã có trong danh sách.</p>` : ''}
+      ${pod ? `<div class="pod-head"><span class="pod-cover lg" aria-hidden="true">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer">` : '🎧'}</span><p class="muted xs url-line">${esc(id)}</p></div>
+      <p class="muted xs pod-status" role="status" aria-live="polite"></p>` : `<p class="muted xs url-line">${esc(id)}</p>`}
+      <label for="art-title">${pod ? 'Tên tập' : 'Tiêu đề'}</label>
+      <input id="art-title" type="text" value="${esc(title || prev?.title || (pod ? '' : titleFromUrl(id)))}" autocomplete="off">
+      ${pod ? `
+      <label for="art-show">Chương trình</label>
+      <input id="art-show" type="text" list="art-show-list" value="${esc(prev && prev.source !== 'Spotify' ? prev.source : '')}" autocomplete="off">
+      <datalist id="art-show-list">${shows.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+      <label for="art-min">Số phút</label>
+      <input id="art-min" type="number" inputmode="numeric" min="1" max="999" value="${prev?.minutes || ''}">` : ''}
       <label for="art-tag-in">Tag</label>
       <div class="tag-input">
         <span class="chosen"></span>
@@ -1131,19 +1159,61 @@ function openArticleEditor({ url, title }) {
     e.preventDefault();
     addTyped();
     try {
-      const { existed } = await upsertArticle({ url: id, title: dlg.querySelector('#art-title').value, tags });
+      const extra = pod ? { show: dlg.querySelector('#art-show').value, minutes: dlg.querySelector('#art-min').value, cover } : {};
+      const { existed } = await upsertArticle({ url: id, title: dlg.querySelector('#art-title').value, tags, ...extra });
       S.articles = await loadArticles();
       dlg.close('save');
-      toast(existed ? 'Đã cập nhật bài' : 'Đã lưu bài đã đọc');
+      toast(existed ? (pod ? 'Đã cập nhật tập' : 'Đã cập nhật bài') : (pod ? 'Đã lưu tập podcast đã nghe' : 'Đã lưu bài đã đọc'));
       const inp = app.querySelector('#art-url');
       if (inp) inp.value = '';
       if ((S.route || '').startsWith('#/articles')) renderArticles(); else location.hash = '#/articles';
     } catch (err) { toast(err.message); }
   });
-  dlg.addEventListener('close', () => dlg.remove());
+  const stop = new AbortController();
+  dlg.addEventListener('close', () => { stop.abort(); dlg.remove(); });
   draw();
   dlg.showModal();
+  if (pod) fillPodcast(dlg, id, prev, stop.signal, (c) => { cover = c; });
   if (!prev) tagIn.focus();
+}
+
+// Tự điền tập podcast: chỉ điền ô còn trống, không đè chữ chủ app đã gõ.
+async function fillPodcast(dlg, url, prev, signal, setCover) {
+  const $ = (sel) => dlg.querySelector(sel);
+  const status = (t) => { const el = $('.pod-status'); if (el) el.textContent = t; };
+  const fill = (sel, v) => { const el = $(sel); if (el && v && !el.value.trim()) el.value = v; };
+  const needCover = !prev?.cover;
+  const needMeta = !prev || !prev.minutes || !prev.source || prev.source === 'Spotify';
+  if (!needCover && !needMeta) return;
+  let title = $('#art-title').value.trim();
+  if (needCover || !title) {
+    try {
+      const o = await spotifyOembed(url, signal);
+      fill('#art-title', o.title);
+      title = title || o.title;
+      if (o.cover && needCover) {
+        setCover(o.cover);
+        const box = $('.pod-cover');
+        if (box) box.innerHTML = `<img src="${esc(o.cover)}" alt="" referrerpolicy="no-referrer">`;
+      }
+    } catch { /* Gemini bên dưới vẫn lấy được tên tập */ }
+  }
+  if (!needMeta || signal.aborted) return;
+  const key = S.settings.geminiKey;
+  if (!key) { status('Chưa có Gemini API key (Cài đặt) nên cần nhập tay tên chương trình và số phút.'); return; }
+  const t0 = Date.now();
+  status('Đang lấy tên chương trình và số phút…');
+  const tick = setInterval(() => status(`Đang lấy tên chương trình và số phút… ${Math.round((Date.now() - t0) / 1000)}s`), 1000);
+  try {
+    const info = await readPodcastPage(key, url, title, signal);
+    if (signal.aborted) return;
+    fill('#art-title', info.title);
+    fill('#art-show', info.show);
+    fill('#art-min', info.minutes);
+    status(`Đã điền tự động (${Math.round((Date.now() - t0) / 1000)}s), kiểm tra lại trước khi lưu.`);
+  } catch (e) {
+    if (!signal.aborted) status(`Không tự lấy được, nhập tay giúp: ${e.message}`);
+  } finally { clearInterval(tick); }
 }
 
 // ---------------- Highlight (mục con của Ghi chép) ----------------
@@ -1808,13 +1878,14 @@ async function onClick(e) {
   if (a === 'hl-edit') return openHighlightEditor(S.highlights[id]);
   if (a === 'hl-del') return removeHighlight(id);
   if (a === 'art-tag') { S.artTag = S.artTag === el.dataset.tag ? '' : el.dataset.tag; return renderArticles(); }
+  if (a === 'art-kind') { S.artKind = el.dataset.kind || ''; return renderArticles(); }
   if (a === 'art-edit') { const r = S.articles[id]; if (r) openArticleEditor({ url: r.url, title: r.title }); return; }
   if (a === 'art-del') {
     const before = await deleteArticle(id);
     S.articles = await loadArticles();
     renderArticles();
     if (before) {
-      toast('Đã xoá bài', { label: 'Hoàn tác', fn: async () => { await restoreArticle(before); S.articles = await loadArticles(); if ((S.route || '').startsWith('#/articles')) renderArticles(); } });
+      toast(isPodcast(before) ? 'Đã xoá tập' : 'Đã xoá bài', { label: 'Hoàn tác', fn: async () => { await restoreArticle(before); S.articles = await loadArticles(); if ((S.route || '').startsWith('#/articles')) renderArticles(); } });
     }
     return;
   }

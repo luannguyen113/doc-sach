@@ -9,7 +9,8 @@ export function cleanUrl(raw) {
   let u;
   try { u = new URL(String(raw).trim()); } catch { return null; }
   if (!/^https?:$/.test(u.protocol)) return null;
-  if (u.hostname.endsWith('substack.com')) u.search = '';
+  if (u.hostname.endsWith('substack.com') || u.hostname === 'open.spotify.com') u.search = '';
+  if (u.hostname === 'open.spotify.com') u.pathname = u.pathname.replace(/^\/intl-[a-z-]+\//i, '/');
   else for (const k of [...u.searchParams.keys()]) if (TRACKING.test(k)) u.searchParams.delete(k);
   u.hash = '';
   return u.toString().replace(/\/$/, '');
@@ -19,6 +20,11 @@ export function cleanUrl(raw) {
 export function extractUrl(text) {
   const m = String(text || '').match(/https?:\/\/[^\s<>"']+/);
   return m ? m[0] : null;
+}
+
+// Tập podcast trên Spotify (open.spotify.com/episode/…). spotify.link là link rút gọn, phải mở ra mới biết.
+export function isPodcastUrl(url) {
+  try { const u = new URL(url); return u.hostname === 'open.spotify.com' && /^\/episode\//.test(u.pathname); } catch { return false; }
 }
 
 export function sourceOf(url) {
@@ -50,21 +56,30 @@ async function saveAll(map) {
   scheduleSync(5000);
 }
 
-export async function upsertArticle({ url, title, tags }) {
+export async function upsertArticle({ url, title, tags, show, minutes, cover }) {
   const map = await loadArticles();
   const id = cleanUrl(url);
   if (!id) throw new Error('Link không hợp lệ');
   const prev = map[id];
   const now = Date.now();
+  const podcast = isPodcastUrl(id);
+  const showName = String(show || '').trim();
   map[id] = {
     id,
     url: id,
     title: (title || '').trim() || prev?.title || titleFromUrl(id),
-    source: sourceOf(id),
+    source: podcast ? (showName || 'Spotify') : sourceOf(id),
     tags: [...new Set((tags || []).map(normTag).filter(Boolean))],
     readAt: prev && !prev.deleted ? prev.readAt : now,
     updatedAt: now,
   };
+  // Podcast: dùng chung danh sách Bài viết, thêm loại, tên chương trình (= nguồn), số phút, ảnh bìa (link Spotify).
+  if (podcast) {
+    map[id].kind = 'podcast';
+    const m = Math.round(Number(minutes));
+    if (m > 0) map[id].minutes = m;
+    if (cover || prev?.cover) map[id].cover = cover || prev.cover;
+  }
   await saveAll(map);
   return { rec: map[id], existed: Boolean(prev && !prev.deleted) };
 }
@@ -86,6 +101,13 @@ export async function restoreArticle(rec) {
 
 export function activeList(map) {
   return Object.values(map).filter((a) => !a.deleted).sort((a, b) => b.readAt - a.readAt);
+}
+
+export const isPodcast = (a) => a?.kind === 'podcast';
+
+// Tên chương trình đã dùng, để gợi ý khi nhập tay.
+export function showNames(list) {
+  return [...new Set(list.filter(isPodcast).map((a) => a.source).filter((s) => s && s !== 'Spotify'))];
 }
 
 export function tagCounts(list) {

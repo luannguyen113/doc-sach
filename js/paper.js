@@ -85,7 +85,7 @@ const SCHEMA = {
   },
 };
 
-async function gem(path, key, opts = {}) {
+export async function gem(path, key, opts = {}) {
   return fetch(`${GEMINI}/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`, opts);
 }
 
@@ -119,7 +119,7 @@ export async function pickGeminiModels(key, { force = false } = {}) {
   return alive(order);
 }
 
-async function markDead(model) {
+export async function markDead(model) {
   const dead = (await db.get('kv', 'geminiDead')) || {};
   dead[model] = Date.now();
   await db.set('kv', 'geminiDead', dead);

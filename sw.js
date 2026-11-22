@@ -1,12 +1,12 @@
 // Service worker: lưu vỏ app để mở được khi offline. Sách lưu riêng trong bộ nhớ của app (OPFS), không qua đây.
-const VERSION = 'v1.8.1';
+const VERSION = 'v1.9.0';
 const SHELL = `shell-${VERSION}`;
 const VENDOR = 'vendor-pdfjs-6.5.438';
 
 const SHELL_FILES = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/app.js', './js/config.js', './js/db.js', './js/auth.js', './js/drive.js',
-  './js/storage.js', './js/sync.js', './js/reader.js', './js/ui.js', './js/articles.js', './js/stats.js', './js/paper.js', './js/highlights.js',
+  './js/storage.js', './js/sync.js', './js/reader.js', './js/ui.js', './js/articles.js', './js/stats.js', './js/paper.js', './js/highlights.js', './js/podcast.js',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png',
 ];
 const VENDOR_FILES = ['./vendor/pdfjs/pdf.min.mjs', './vendor/pdfjs/pdf.worker.min.mjs'];
