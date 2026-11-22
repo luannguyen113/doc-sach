@@ -532,6 +532,7 @@ export class Reader {
     const sp = this.spreadFor(this.page);
     const last = sp[sp.length - 1];
     if (last < this.total) { this.page = last + 1; this.afterMove(); }
+    else if (this.total && this.o.onEnd) this.o.onEnd(); // đã ở trang cuối mà vẫn lật tiếp
   }
   prev() {
     const first = this.spreadFor(this.page)[0];

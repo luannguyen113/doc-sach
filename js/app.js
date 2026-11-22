@@ -1647,6 +1647,7 @@ async function openBook(id) {
     highlightsFor: (page) => highlightsOf(S.highlights, id, page),
     onSelection: (action, sel) => onReaderSelection(b, action, sel),
     onHighlightTap: (hid) => openHighlightEditor(S.highlights[hid]),
+    onEnd: () => onReachEnd(b),
   });
   S.reader = reader;
   sessActivity();
@@ -1688,6 +1689,15 @@ async function openBook(id) {
     else if (e?.name === 'PasswordException') reader.showMsg('File PDF này có mật khẩu, app chưa hỗ trợ.', 'Về thư viện', () => { location.hash = '#/'; });
     else reader.showMsg('Không mở được sách. Kiểm tra mạng rồi thử lại.', 'Thử lại', () => { closeReader(); openBook(id); });
   }
+}
+
+// Truyện tranh: lật tiếp ở trang cuối → mở tập kế tiếp của bộ; hết bộ thì báo kết thúc.
+function onReachEnd(b) {
+  if (!S.reader || S.readingId !== b.id || S.reader.o.kind !== 'manga') return;
+  const n = nextVolume(b);
+  if (!n) { toast('Đã kết thúc, vui lòng đọc cuốn khác'); return; }
+  toast(`Đang mở Tập ${n.vol}…`);
+  location.replace(`#/read/${encodeURIComponent(n.id)}`); // thay chỗ trong lịch sử: nút Back vẫn về thư viện
 }
 
 function updateReaderStatus() {
