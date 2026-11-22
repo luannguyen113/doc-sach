@@ -10,10 +10,16 @@ App đọc sách PDF cá nhân (PWA). Sách lấy từ Google Drive, đọc đư
 - Đồng bộ trang đang đọc giữa các máy qua file ẩn trong Google Drive (appDataFolder).
 - Ghi phiên đọc và streak (thống kê chi tiết ở P2).
 
+## Highlight & tìm kiếm (v1.7.0)
+- Sách chữ có lớp chữ bên trong: giữ tay lên một từ, kéo để chọn cụm → thanh **Highlight · Ghi chú · Tìm Google · Sao chép**.
+- Highlight lưu trang, đoạn chữ, vị trí, ghi chú, tag; xem lại ở tab **Ghi chép → Highlight**, bấm để mở đúng trang. Chạm vào highlight trên trang để sửa/xoá.
+- PDF dạng ảnh scan chưa hỗ trợ (để sau: khoanh vùng → Gemini đọc chữ).
+
 ## Cấu trúc
 - `index.html`, `css/app.css`: giao diện.
 - `js/app.js`: thư viện, quy tắc tải theo mạng, phiên đọc, cài đặt.
-- `js/reader.js`: trình đọc (pdf.js, đọc từng phần qua range request).
+- `js/reader.js`: trình đọc (pdf.js, đọc từng phần qua range request, lớp chữ để chọn chữ, vẽ highlight).
+- `js/highlights.js`: lưu highlight (đồng bộ chung file ẩn trên Drive).
 - `js/storage.js`: lưu offline (OPFS) và hàng đợi tải.
 - `js/drive.js`, `js/auth.js`, `js/sync.js`: Google Drive, đăng nhập, đồng bộ.
 - `sw.js`: service worker để app mở được khi offline.

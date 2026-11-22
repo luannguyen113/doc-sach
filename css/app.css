@@ -98,7 +98,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .empty { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
 
 /* Điều hướng dưới */
-.nav { position: sticky; bottom: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); background: var(--surface); padding-bottom: env(safe-area-inset-bottom); }
+.nav { position: sticky; bottom: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); background: var(--surface); padding-bottom: env(safe-area-inset-bottom); }
 .nav a { min-height: 60px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 12px; color: var(--muted); text-decoration: none; }
 .nav a.on { color: var(--text); font-weight: 600; }
 
@@ -257,3 +257,49 @@ dialog.sheet { max-height: 92dvh; overflow: auto; }
 .two-col input { min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; width: 100%; }
 .two-col label { font-size: 13px; font-weight: 600; }
 .series-head .pill { flex-shrink: 0; }
+
+/* ---------- Khung trang, lớp chữ (pdf.js 6.5 TextLayer), highlight ---------- */
+.rd-pg { position: relative; flex-shrink: 0; background: #fff;
+  --user-unit: 1; --total-scale-factor: calc(var(--scale-factor) * var(--user-unit)); --scale-round-x: 1px; --scale-round-y: 1px; }
+.rd-pg canvas { width: 100%; height: 100%; }
+.rd-hls { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.rd-hls i { position: absolute; display: block; background: rgb(250 204 21 / .45); mix-blend-mode: multiply; border-radius: 2px; }
+.rd-hls i.flash { animation: hl-flash .7s ease-in-out 3; }
+@keyframes hl-flash { 50% { background: rgb(250 204 21 / .9); outline: 2px solid rgb(202 138 4); } }
+@media (prefers-reduced-motion: reduce) { .rd-hls i.flash { animation: none; outline: 2px solid rgb(202 138 4); } }
+.textLayer { color-scheme: only light; position: absolute; text-align: initial; inset: 0; overflow: clip; opacity: 1; line-height: 1;
+  letter-spacing: normal; word-spacing: normal; -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none;
+  transform-origin: 0 0; caret-color: CanvasText; z-index: 1;
+  --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
+.textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; -webkit-user-select: text; user-select: text; }
+.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) { z-index: 1; --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
+.textLayer .markedContent { display: contents; }
+.textLayer span[role="img"] { -webkit-user-select: none; user-select: none; cursor: default; }
+.textLayer ::selection { background: rgb(37 99 235 / .3); color: transparent; }
+.textLayer br::selection { background: transparent; }
+.textLayer .endOfContent { display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default; -webkit-user-select: none; user-select: none; }
+.textLayer.selecting .endOfContent { top: 0; }
+
+/* Thanh thao tác khi chọn chữ */
+.rd-selbar { position: absolute; left: 50%; transform: translateX(-50%); bottom: max(14px, calc(env(safe-area-inset-bottom) + 10px)); z-index: 7;
+  display: flex; gap: 2px; padding: 4px; border-radius: 14px; background: var(--btn); color: var(--btn-text); box-shadow: 0 6px 24px rgb(0 0 0 / .25); max-width: calc(100% - 16px); }
+.rd-selbar[hidden] { display: none; }
+.rd-selbar button { min-height: 48px; min-width: 48px; padding: 0 10px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  border: none; border-radius: 10px; background: transparent; color: inherit; font: inherit; font-size: 11px; white-space: nowrap; cursor: pointer; -webkit-user-select: none; user-select: none; }
+.rd-selbar button:active { background: color-mix(in srgb, var(--btn-text) 15%, transparent); }
+
+/* Ghi chép: Bài viết | Highlight */
+.notes-seg { margin-bottom: 2px; }
+.notes-seg a { min-height: 40px; padding: 0 14px; display: inline-flex; align-items: center; border-radius: 8px; font-size: 13px; color: var(--muted); text-decoration: none; flex: 1; justify-content: center; }
+.notes-seg a.on { background: var(--surface); color: var(--text); font-weight: 600; }
+.hl-group { display: flex; flex-direction: column; gap: 8px; }
+.hl-group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.hl-group-head strong { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hl { display: flex; flex-direction: column; gap: 8px; }
+.hl-open { display: flex; flex-direction: column; gap: 6px; padding: 0; border: none; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; min-height: 44px; }
+.hl-quote { margin: 0; padding-left: 10px; border-left: 3px solid rgb(234 179 8); font-size: 15px; line-height: 1.5; }
+.hl-note { margin: 0; font-size: 14px; color: var(--muted); white-space: pre-wrap; }
+.sheet-body textarea { min-height: 96px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+.hl-sheet-quote { max-height: 30dvh; overflow: auto; }

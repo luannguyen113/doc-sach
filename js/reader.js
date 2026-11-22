@@ -1,6 +1,7 @@
 // Trình đọc PDF: 2 chế độ (Sách chữ / Truyện tranh), 1 hoặc 2 trang, lật phải→trái, đọc từng phần.
+// Mỗi trang = khung .rd-pg gồm: ảnh trang (canvas) + lớp highlight + lớp chữ trong suốt (để chọn chữ, highlight, tìm Google).
 import * as pdfjs from '../vendor/pdfjs/pdf.min.mjs';
-import { esc, icon } from './ui.js';
+import { esc, icon, toast } from './ui.js';
 
 const BASE = new URL('../vendor/pdfjs/', import.meta.url).href;
 pdfjs.GlobalWorkerOptions.workerSrc = BASE + 'pdf.worker.min.mjs';
@@ -30,12 +31,18 @@ class RangeTransport extends pdfjs.PDFDataRangeTransport {
 }
 
 const CACHE_MAX = 10;
+
+function freeCanvas(w) {
+  const c = w?.querySelector?.('canvas');
+  if (c) { c.width = 0; c.height = 0; }
+}
 const MAX_PIXELS = 16e6;
 
 export class Reader {
   /**
    * o: { title, subtitle, kind: 'manga'|'text', dir: 'rtl'|'ltr', layout: 'auto'|'single'|'double',
-   *      coverAlone: bool, startPage, onPosition(pos), onActivity(), onPrefChange(key, value) }
+   *      coverAlone: bool, startPage, onPosition(pos), onActivity(), onPrefChange(key, value),
+   *      highlightsFor(page) -> [{ id, rects }], onSelection(action, { page, text, rects }), onHighlightTap(id), flashId }
    */
   constructor(host, o) {
     this.host = host;
@@ -86,6 +93,12 @@ export class Reader {
           <div class="rd-msg" hidden><p></p><button type="button" class="btn"></button></div>
         </div>
         <div class="rd-mini tnum" aria-hidden="true"></div>
+        <div class="rd-selbar" role="toolbar" aria-label="Thao tác với đoạn chữ đã chọn" hidden>
+          <button type="button" data-sel="highlight">${icon('marker', 18)}<span>Highlight</span></button>
+          <button type="button" data-sel="note">${icon('note', 18)}<span>Ghi chú</span></button>
+          <button type="button" data-sel="search">${icon('search', 18)}<span>Tìm Google</span></button>
+          <button type="button" data-sel="copy">${icon('copy', 18)}<span>Sao chép</span></button>
+        </div>
         <footer class="rd-bottom">
           <button type="button" class="nav-btn rd-left"></button>
           <div class="rd-mid">
@@ -113,6 +126,7 @@ export class Reader {
     this.btnZoom = $('.rd-zoom');
     this.btnMore = $('.rd-more');
     this.coverBox = $('.rd-cover');
+    this.selBar = $('.rd-selbar');
     this.applyChrome();
   }
 
@@ -224,6 +238,7 @@ export class Reader {
     return spread.map((n, i) => ({ n, w: h * (sizes[i].w / sizes[i].h) * this.z, ratio: sizes[i].h / sizes[i].w }));
   }
 
+  // Trả về khung trang .rd-pg (canvas đã vẽ). Lớp chữ dựng sau, chỉ cho các trang đang hiện.
   render(n, cssW) {
     const key = `${n}|${Math.round(cssW)}`;
     if (this.cache.has(key)) {
@@ -242,19 +257,27 @@ export class Reader {
       const c = document.createElement('canvas');
       c.width = Math.floor(vp.width);
       c.height = Math.floor(vp.height);
-      c.style.width = `${Math.round(cssW)}px`;
-      c.style.height = `${Math.round(cssW * (v1.height / v1.width))}px`;
       c.setAttribute('role', 'img');
       c.setAttribute('aria-label', `Trang ${n}`);
       await pg.render({ canvas: c, viewport: vp }).promise;
-      return c;
+      const w = document.createElement('div');
+      w.className = 'rd-pg';
+      w.dataset.page = String(n);
+      w.style.width = `${Math.round(cssW)}px`;
+      w.style.height = `${Math.round(cssW * (v1.height / v1.width))}px`;
+      w.style.setProperty('--scale-factor', String(cssW / v1.width));
+      const hl = document.createElement('div');
+      hl.className = 'rd-hls';
+      hl.setAttribute('aria-hidden', 'true');
+      w.append(c, hl);
+      return w;
     })();
     this.cache.set(key, p);
     p.catch(() => this.cache.delete(key));
     while (this.cache.size > CACHE_MAX) {
       const [k, old] = this.cache.entries().next().value;
       this.cache.delete(k);
-      old.then((c) => { if (!c.isConnected) { c.width = 0; c.height = 0; } }).catch(() => {});
+      old.then((w) => { if (!w.isConnected) freeCanvas(w); }).catch(() => {});
     }
     return p;
   }
@@ -274,6 +297,9 @@ export class Reader {
       clearTimeout(loadingTimer);
       if (!this.msgEl.querySelector('button:not([hidden])')) this.hideMsg();
       this.spreadEl.replaceChildren(...canvases);
+      this.hideSelBar();
+      for (const w of canvases) { this.drawHighlights(w); this.ensureTextLayer(w); }
+      if (this.o.flashId) { this.flash(this.o.flashId); this.o.flashId = null; }
       if (resetScroll) this.stage.scrollTo(0, 0);
       const last = spread[spread.length - 1];
       this.o.onPosition?.({ page: spread[0], last, total: this.total, finished: last >= this.total });
@@ -304,6 +330,121 @@ export class Reader {
     this.label.textContent = `${a === b ? a : `${a}–${b}`} / ${this.total} · ${pct}%`;
     this.mini.textContent = `${a === b ? a : `${a}–${b}`} / ${this.total}`;
     this.slider.value = String(a);
+  }
+
+  // ---------- Lớp chữ & highlight ----------
+  // Lớp chữ trong suốt phủ đúng vị trí chữ trên ảnh trang: giữ tay lên chữ để chọn như trên web.
+  // Trang không có chữ bên trong (PDF scan, truyện tranh) thì không dựng gì.
+  ensureTextLayer(w) {
+    if (w.tl) return w.tl;
+    w.tl = (async () => {
+      const n = Number(w.dataset.page);
+      const pg = await this.pdf.getPage(n);
+      const tc = await pg.getTextContent();
+      if (!tc.items.some((it) => it.str && it.str.trim())) { w.dataset.notext = '1'; return; }
+      const scale = parseFloat(w.style.getPropertyValue('--scale-factor')) || 1;
+      const div = document.createElement('div');
+      div.className = 'textLayer';
+      const tl = new pdfjs.TextLayer({ textContentSource: tc, container: div, viewport: pg.getViewport({ scale }) });
+      await tl.render();
+      w.appendChild(div);
+    })().catch(() => { w.tl = null; });
+    return w.tl;
+  }
+
+  drawHighlights(w) {
+    const layer = w.querySelector('.rd-hls');
+    if (!layer) return;
+    const list = this.o.highlightsFor?.(Number(w.dataset.page)) || [];
+    layer.innerHTML = list.map((h) => (h.rects || []).map(([x, y, rw, rh]) =>
+      `<i data-id="${esc(h.id)}" style="left:${x * 100}%;top:${y * 100}%;width:${rw * 100}%;height:${rh * 100}%"></i>`).join('')).join('');
+  }
+
+  refreshHighlights() {
+    this.spreadEl.querySelectorAll('.rd-pg').forEach((w) => this.drawHighlights(w));
+  }
+
+  flash(id) {
+    const els = this.spreadEl.querySelectorAll(`.rd-hls i[data-id="${CSS.escape(id)}"]`);
+    els.forEach((el) => el.classList.add('flash'));
+    els[0]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setTimeout(() => els.forEach((el) => el.classList.remove('flash')), 2200);
+  }
+
+  // Highlight nằm dưới điểm chạm (toạ độ màn hình), nếu có.
+  hitHighlight(cx, cy) {
+    for (const w of this.spreadEl.querySelectorAll('.rd-pg')) {
+      const r = w.getBoundingClientRect();
+      if (cx < r.left || cx > r.right || cy < r.top || cy > r.bottom) continue;
+      const fx = (cx - r.left) / r.width;
+      const fy = (cy - r.top) / r.height;
+      const pad = 0.006;
+      for (const h of this.o.highlightsFor?.(Number(w.dataset.page)) || []) {
+        if ((h.rects || []).some(([x, y, rw, rh]) => fx >= x - pad && fx <= x + rw + pad && fy >= y - pad && fy <= y + rh + pad)) return h.id;
+      }
+    }
+    return null;
+  }
+
+  // Đọc vùng chữ đang chọn: trang, đoạn chữ, các ô chữ nhật (tỉ lệ 0–1 so với trang, gộp theo dòng).
+  readSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    const startEl = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+    const w = startEl?.closest?.('.rd-pg');
+    if (!w || !this.spreadEl.contains(w)) return null;
+    const text = sel.toString().replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    const pr = w.getBoundingClientRect();
+    const boxes = [];
+    for (const r of range.getClientRects()) {
+      if (r.width < 1 || r.height < 1) continue;
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      if (cx < pr.left || cx > pr.right || cy < pr.top || cy > pr.bottom) continue;
+      boxes.push({ l: r.left - pr.left, t: r.top - pr.top, r: r.right - pr.left, b: r.bottom - pr.top });
+    }
+    boxes.sort((a, b) => a.t - b.t || a.l - b.l);
+    const lines = [];
+    for (const b of boxes) {
+      const h = b.b - b.t;
+      const ln = lines.find((x) => Math.abs((x.t + x.b) / 2 - (b.t + b.b) / 2) < h * 0.5 && b.l <= x.r + h * 1.5 && b.r >= x.l - h * 1.5);
+      if (ln) { ln.l = Math.min(ln.l, b.l); ln.r = Math.max(ln.r, b.r); ln.t = Math.min(ln.t, b.t); ln.b = Math.max(ln.b, b.b); }
+      else lines.push({ ...b });
+    }
+    const f = (v) => Math.round(Math.min(1, Math.max(0, v)) * 10000) / 10000;
+    const rects = lines.map((x) => [f(x.l / pr.width), f(x.t / pr.height), f((x.r - x.l) / pr.width), f((x.b - x.t) / pr.height)]);
+    return rects.length ? { page: Number(w.dataset.page), text, rects } : null;
+  }
+
+  onSelChange() {
+    const s = this.readSelection();
+    if (s) {
+      clearTimeout(this.selHideTimer);
+      this.sel = s;
+      this.selBar.hidden = false;
+      this.root.classList.add('has-sel');
+      clearTimeout(this.hideTimer);
+      this.root.classList.add('immersive');
+    } else if (this.sel && !this.selBarBusy) {
+      // Chờ một chút: chạm vào nút trên thanh có thể làm mất vùng chọn trước khi nút nhận lệnh.
+      clearTimeout(this.selHideTimer);
+      this.selHideTimer = setTimeout(() => { if (!this.selBarBusy) this.hideSelBar(); }, 450);
+    }
+  }
+
+  hideSelBar() {
+    clearTimeout(this.selHideTimer);
+    this.sel = null;
+    this.selBarBusy = false;
+    if (this.selBar) this.selBar.hidden = true;
+    this.root?.classList.remove('has-sel');
+  }
+
+  clearSelection() {
+    try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
+    this.hideSelBar();
   }
 
   // ---------- Thanh trên/dưới tự ẩn ----------
@@ -447,21 +588,53 @@ export class Reader {
     }, sig);
     this.stage.addEventListener('scroll', () => this.o.onActivity?.(), { ...sig, passive: true });
 
+    // Chọn chữ → thanh thao tác (Highlight · Ghi chú · Tìm Google · Sao chép)
+    let selT = null;
+    document.addEventListener('selectionchange', () => { clearTimeout(selT); selT = setTimeout(() => this.onSelChange(), 200); }, sig);
+    const keep = (e) => { this.selBarBusy = true; clearTimeout(this.selHideTimer); e.preventDefault(); };
+    this.selBar.addEventListener('pointerdown', keep, sig);
+    this.selBar.addEventListener('mousedown', (e) => e.preventDefault(), sig);
+    this.selBar.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-sel]');
+      const s = this.sel;
+      this.selBarBusy = false;
+      if (!b || !s) { this.clearSelection(); return; }
+      this.o.onActivity?.();
+      this.o.onSelection?.(b.dataset.sel, s);
+      this.clearSelection();
+    }, sig);
+
     // Chạm & vuốt
     let down = null;
     let lastTap = 0;
     let tapTimer = null;
+    let hinted = false;
     this.stage.addEventListener('pointerdown', (e) => {
-      down = { x: e.clientX, y: e.clientY, t: performance.now() };
+      const sel = window.getSelection();
+      down = { x: e.clientX, y: e.clientY, t: performance.now(), hadSel: Boolean(sel && !sel.isCollapsed), pg: e.target.closest?.('.rd-pg'),
+        // Chuột bấm lên chữ (laptop) = đang chọn chữ, không phải vuốt lật trang.
+        mouseText: e.pointerType === 'mouse' && Boolean(e.target.closest?.('.textLayer')) };
     }, sig);
     this.stage.addEventListener('pointerup', (e) => {
       if (!down) return;
       const dx = e.clientX - down.x;
       const dy = e.clientY - down.y;
       const dt = performance.now() - down.t;
+      const d0 = down;
       down = null;
       if (e.target.closest('.rd-msg')) return;
       this.o.onActivity?.();
+      // Đang có vùng chọn: chạm = bỏ chọn, không lật trang. Vừa kéo chuột chọn chữ (laptop): không coi là vuốt.
+      const selNow = window.getSelection();
+      if (d0.hadSel) { if (Math.abs(dx) < 10 && Math.abs(dy) < 10) this.clearSelection(); return; }
+      if (selNow && !selNow.isCollapsed && this.spreadEl.contains(selNow.anchorNode)) return;
+      if (d0.mouseText && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) return;
+      // Giữ tay trên trang ảnh scan của sách chữ: báo một lần là trang này không có chữ để chọn.
+      if (dt > 500 && Math.abs(dx) < 10 && Math.abs(dy) < 10 && !hinted && d0.pg?.dataset.notext && this.o.kind === 'text') {
+        hinted = true;
+        toast('Trang này là ảnh scan, không có chữ để chọn');
+        return;
+      }
       const pinched = (window.visualViewport?.scale || 1) > 1.01;
       if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.3 && this.z === 1 && !pinched) {
         // Vuốt: ngón tay sang trái = đi theo hướng "phải" của sách và ngược lại.
@@ -480,7 +653,11 @@ export class Reader {
         return;
       }
       lastTap = now;
+      const px = e.clientX;
+      const py = e.clientY;
       tapTimer = setTimeout(() => {
+        const hit = this.hitHighlight(px, py);
+        if (hit) { this.o.onHighlightTap?.(hit); return; }
         const zone = cx / rect.width;
         if (this.z > 1 || pinched || (zone > 0.3 && zone < 0.7)) {
           if (this.root.classList.contains('immersive')) this.showChrome(); else this.hideChrome();
@@ -525,7 +702,7 @@ export class Reader {
     document.querySelector('dialog.rd-goto')?.remove();
     this.ac?.abort();
     this.ro?.disconnect();
-    this.cache.forEach((p) => p.then((c) => { c.width = 0; c.height = 0; }).catch(() => {}));
+    this.cache.forEach((p) => p.then(freeCanvas).catch(() => {}));
     this.cache.clear();
     try { this.task?.destroy(); } catch { /* bỏ qua */ }
     this.host.innerHTML = '';

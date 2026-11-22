@@ -16,6 +16,9 @@ import {
 } from './articles.js';
 import { computeStats, renderStatsHtml } from './stats.js';
 import {
+  loadHighlights, saveHighlight, deleteHighlight, restoreHighlight, activeHighlights, highlightsOf, groupByBook,
+} from './highlights.js';
+import {
   loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, paperTitle, shrinkImage, readCoverText, pickGeminiModels, saveCover, fetchCover,
 } from './paper.js';
 
@@ -44,6 +47,10 @@ const S = {
   artQuery: '',
   statsPeriod: 'month',
   paper: {},
+  highlights: {},
+  hlTag: '',
+  hlQuery: '',
+  jump: null, // mở sách tới đúng trang của một highlight: { id, page, flashId }
 };
 
 // ---------------- Khởi động ----------------
@@ -62,6 +69,7 @@ async function boot() {
   ]);
   S.articles = articles;
   S.paper = await loadPaper();
+  S.highlights = await loadHighlights();
   const gk = await getPref('geminiKey');
   if (gk != null && !S.settings.geminiKey) S.settings.geminiKey = gk;
   if (settings) S.settings = { ...S.settings, ...settings };
@@ -133,6 +141,8 @@ async function reloadFromDb() {
   S.sessions = s;
   S.articles = a;
   S.paper = await loadPaper();
+  S.highlights = await loadHighlights();
+  S.reader?.refreshHighlights();
   const gk = await getPref('geminiKey');
   if (gk != null) S.settings.geminiKey = gk;
   runPolicy();
@@ -352,7 +362,7 @@ function renderView() {
   const pm = h.match(/^#\/paper\/(.+)$/);
   if (pm) return renderPaperDetail(decodeURIComponent(pm[1]));
   if (h.startsWith('#/stats')) return renderStats();
-  if (h.startsWith('#/hl')) return renderPlaceholder('hl');
+  if (h.startsWith('#/hl')) return renderHighlights();
   return renderLibrary();
 }
 
@@ -938,7 +948,8 @@ function bookRow(b, inSeries) {
 
 function nav(active) {
   const item = (key, href, ic, label) => `<a href="${href}" class="${active === key ? 'on' : ''}" ${active === key ? 'aria-current="page"' : ''}>${icon(ic)}<span>${label}</span></a>`;
-  return `<nav class="nav" aria-label="Điều hướng chính">${item('lib', '#/', 'library', 'Thư viện')}${item('art', '#/articles', 'article', 'Bài viết')}${item('stats', '#/stats', 'stats', 'Thống kê')}${item('hl', '#/hl', 'pen', 'Highlight')}</nav>`;
+  const notesHref = S.notesSeg === 'hl' ? '#/hl' : '#/articles';
+  return `<nav class="nav" aria-label="Điều hướng chính">${item('lib', '#/', 'library', 'Thư viện')}${item('art', notesHref, 'article', 'Ghi chép')}${item('stats', '#/stats', 'stats', 'Thống kê')}</nav>`;
 }
 
 function renderWelcome() {
@@ -956,9 +967,7 @@ function renderWelcome() {
 
 function renderPlaceholder(which) {
   const sessions = S.sessions.filter((s) => s.activeSec >= CONFIG.minSessionSec).length;
-  const body = which === 'stats'
-    ? `<h1>Thống kê</h1><div class="card"><p><strong>Thống kê chi tiết sẽ có ở giai đoạn P2</strong> (heatmap, phút đọc theo thể loại và theo bộ).</p><p class="muted">App đã bắt đầu ghi phiên đọc từ bây giờ, hiện có <span class="tnum">${sessions}</span> phiên hợp lệ, nên khi lên P2 sẽ có sẵn dữ liệu.</p></div>`
-    : `<h1>Highlight</h1><div class="card"><p><strong>Highlight và gửi sang Notion “Reflection” sẽ có ở giai đoạn P3.</strong></p><p class="muted">P1 tập trung vào trải nghiệm đọc và tải offline.</p></div>`;
+  const body = `<h1>Thống kê</h1><div class="card"><p><strong>Thống kê chi tiết sẽ có ở giai đoạn P2</strong> (heatmap, phút đọc theo thể loại và theo bộ).</p><p class="muted">App đã bắt đầu ghi phiên đọc từ bây giờ, hiện có <span class="tnum">${sessions}</span> phiên hợp lệ, nên khi lên P2 sẽ có sẵn dữ liệu.</p></div>`;
   app.innerHTML = `<div class="page"><main class="main">${body}</main>${nav(which)}</div>`;
 }
 
@@ -987,14 +996,27 @@ function filteredArticles() {
     && (!q || a.title.toLowerCase().includes(q) || a.source.toLowerCase().includes(q)));
 }
 
+// Đầu màn Ghi chép (mở luôn thẻ <main>), dùng chung cho 2 mục Bài viết | Highlight.
+function notesHead(seg) {
+  S.notesSeg = seg;
+  const nArt = activeList(S.articles).length;
+  const nHl = activeHighlights(S.highlights).length;
+  return `
+      <header class="top"><div><h1>Ghi chép</h1><span class="muted sm tnum">${nArt} bài đã đọc · ${nHl} highlight</span></div></header>
+      <main class="main">
+        <nav class="seg-tabs notes-seg" aria-label="Loại ghi chép">
+          <a href="#/articles" class="${seg === 'art' ? 'on' : ''}" ${seg === 'art' ? 'aria-current="page"' : ''}>Bài viết</a>
+          <a href="#/hl" class="${seg === 'hl' ? 'on' : ''}" ${seg === 'hl' ? 'aria-current="page"' : ''}>Highlight</a>
+        </nav>`;
+}
+
 function renderArticles() {
   const all = activeList(S.articles);
   const tags = tagCounts(all);
   if (S.artTag && !tags.some(([t]) => t === S.artTag)) S.artTag = '';
   app.innerHTML = `
     <div class="page">
-      <header class="top"><div><h1>Bài viết</h1><span class="muted sm tnum">${all.length} bài đã đọc</span></div></header>
-      <main class="main">
+      ${notesHead('art')}
         <section class="card form" aria-label="Thêm bài đã đọc">
           <label for="art-url">Thêm bài đã đọc</label>
           <div class="inline">
@@ -1117,6 +1139,180 @@ function openArticleEditor({ url, title }) {
   if (!prev) tagIn.focus();
 }
 
+// ---------------- Highlight (mục con của Ghi chép) ----------------
+function filteredHighlights() {
+  const q = S.hlQuery.trim().toLowerCase();
+  return activeHighlights(S.highlights).filter((h) => (!S.hlTag || h.tags.includes(S.hlTag))
+    && (!q || h.text.toLowerCase().includes(q) || h.note.toLowerCase().includes(q) || (h.bookTitle || '').toLowerCase().includes(q)));
+}
+
+function renderHighlights() {
+  const all = activeHighlights(S.highlights);
+  const tags = tagCounts(all);
+  if (S.hlTag && !tags.some(([t]) => t === S.hlTag)) S.hlTag = '';
+  app.innerHTML = `
+    <div class="page">
+      ${notesHead('hl')}
+        ${all.length ? `
+        <section class="art-tools" aria-label="Lọc highlight">
+          <input id="hl-q" type="search" placeholder="Tìm trong đoạn trích, ghi chú, tên sách" value="${esc(S.hlQuery)}" autocomplete="off" aria-label="Tìm highlight">
+          ${tags.length ? `<div class="tagbar" role="group" aria-label="Lọc theo tag">
+            <button type="button" class="tag ${S.hlTag ? '' : 'on'}" data-action="hl-tag" data-tag="" aria-pressed="${!S.hlTag}">Tất cả <span class="tnum">${all.length}</span></button>
+            ${tags.map(([t, n]) => `<button type="button" class="tag ${S.hlTag === t ? 'on' : ''}" data-action="hl-tag" data-tag="${esc(t)}" aria-pressed="${S.hlTag === t}">${esc(t)} <span class="tnum">${n}</span></button>`).join('')}
+          </div>` : ''}
+        </section>
+        <section class="list" id="hl-list" aria-label="Highlight theo sách">${hlListHtml()}</section>` : `
+        <div class="card empty"><p><strong>Chưa có highlight.</strong></p>
+          <p class="muted sm">Khi đọc sách chữ: giữ tay lên một từ, kéo hai đầu để chọn cả cụm, rồi bấm <strong>Highlight</strong> hoặc <strong>Ghi chú</strong> trên thanh hiện ra ở dưới. Trên laptop thì kéo chuột để chọn.</p>
+          <p class="muted xs">PDF dạng ảnh scan (truyện tranh, nhiều file kiếm hiệp) không có chữ bên trong nên chưa chọn được.</p></div>`}
+      </main>
+      ${nav('art')}
+    </div>`;
+}
+
+function hlListHtml() {
+  const groups = groupByBook(filteredHighlights());
+  if (!groups.length) return '<p class="muted sm">Không có highlight nào khớp.</p>';
+  return groups.map((g) => `
+    <section class="hl-group" aria-label="${esc(g.title)}">
+      <div class="hl-group-head"><strong>${esc(g.title)}</strong><span class="muted xs tnum">${g.items.length} highlight</span></div>
+      ${g.items.map((h) => `
+      <article class="card hl">
+        <button type="button" class="hl-open" data-action="hl-open" data-id="${esc(h.id)}" aria-label="Mở sách tới trang ${h.page}">
+          <blockquote class="hl-quote">${esc(h.text)}</blockquote>
+          ${h.note ? `<p class="hl-note">${esc(h.note)}</p>` : ''}
+          <span class="muted xs tnum">Trang ${h.page} · ${fmtDate(h.createdAt)}</span>
+        </button>
+        <div class="art-foot">
+          <div class="tags">${h.tags.map((t) => `<button type="button" class="tag sm" data-action="hl-tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('') || '<span class="muted xs">Chưa có tag</span>'}</div>
+          <div class="art-actions">
+            <button type="button" class="icon-btn sm" data-action="hl-edit" data-id="${esc(h.id)}" aria-label="Sửa ghi chú và tag">${icon('edit', 18)}</button>
+            <button type="button" class="icon-btn sm" data-action="hl-del" data-id="${esc(h.id)}" aria-label="Xoá highlight">${icon('trash', 18)}</button>
+          </div>
+        </div>
+      </article>`).join('')}
+    </section>`).join('');
+}
+
+function openHighlightFromList(id) {
+  const h = S.highlights[id];
+  if (!h || h.deleted) return;
+  if (!bookById(h.bookId)) { toast('Sách này không còn trong thư mục Drive. Highlight vẫn được giữ lại.'); return; }
+  S.jump = { id: h.bookId, page: h.page, flashId: h.id };
+  location.hash = `#/read/${encodeURIComponent(h.bookId)}`;
+}
+
+async function removeHighlight(id) {
+  const before = await deleteHighlight(id);
+  S.highlights = await loadHighlights();
+  S.reader?.refreshHighlights();
+  if (!S.reader) renderView();
+  if (before) {
+    toast('Đã xoá highlight', { label: 'Hoàn tác', fn: async () => {
+      await restoreHighlight(before);
+      S.highlights = await loadHighlights();
+      S.reader?.refreshHighlights();
+      if (!S.reader) renderView();
+    } });
+  }
+}
+
+// Thao tác trên đoạn chữ đã chọn trong trình đọc.
+function onReaderSelection(b, action, sel) {
+  const text = sel.text;
+  if (action === 'search') {
+    if (netType() === 'offline') { toast('Cần mạng để tìm trên Google'); return; }
+    window.open(`https://www.google.com/search?q=${encodeURIComponent(text.slice(0, 300))}`, '_blank', 'noopener');
+    return;
+  }
+  if (action === 'copy') {
+    navigator.clipboard?.writeText(text).then(() => toast('Đã sao chép'), () => toast('Không sao chép được'));
+    return;
+  }
+  const draft = { bookId: b.id, bookTitle: displayTitle(b), genre: b.genre, page: sel.page, text, rects: sel.rects, note: '', tags: [] };
+  if (action === 'note') { openHighlightEditor(draft); return; }
+  if (action === 'highlight') {
+    saveHighlight(draft).then(async (rec) => {
+      S.highlights = await loadHighlights();
+      S.reader?.refreshHighlights();
+      toast('Đã highlight', { label: 'Thêm ghi chú', fn: () => openHighlightEditor(S.highlights[rec.id]) });
+    }).catch(() => toast('Không lưu được highlight'));
+  }
+}
+
+// Hộp ghi chú cho highlight: đoạn trích (chỉ xem), ghi chú, tag. rec có id = sửa; không có id = highlight mới.
+function openHighlightEditor(rec) {
+  if (!rec) return;
+  const isNew = !rec.id;
+  let tags = [...(rec.tags || [])];
+  const allTags = tagCounts(activeHighlights(S.highlights)).map(([t]) => t);
+  document.querySelector('dialog.sheet')?.remove();
+  const dlg = document.createElement('dialog');
+  dlg.className = 'sheet';
+  dlg.setAttribute('aria-label', isNew ? 'Highlight và ghi chú' : 'Sửa highlight');
+  dlg.innerHTML = `
+    <form method="dialog" class="sheet-body">
+      <h2 class="sheet-title">${isNew ? 'Highlight và ghi chú' : 'Sửa highlight'}</h2>
+      <p class="muted xs">${esc(rec.bookTitle)} · Trang <span class="tnum">${rec.page}</span></p>
+      <blockquote class="hl-quote hl-sheet-quote">${esc(rec.text)}</blockquote>
+      <label for="hl-note">Ghi chú</label>
+      <textarea id="hl-note" rows="4" placeholder="Anh nghĩ gì về đoạn này?">${esc(rec.note || '')}</textarea>
+      <label for="hl-tag-in">Tag</label>
+      <div class="tag-input">
+        <span class="chosen"></span>
+        <input id="hl-tag-in" type="text" placeholder="Gõ tag rồi Enter, ví dụ y-tuong" autocomplete="off" autocapitalize="off" enterkeyhint="done">
+      </div>
+      <div class="sugg" aria-label="Tag đã dùng"></div>
+      ${isNew ? '' : '<button type="button" class="btn ghost danger" data-x="del">Xoá highlight</button>'}
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" data-x="cancel">Huỷ</button>
+        <button type="submit" class="btn primary">Lưu</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dlg);
+  const tagIn = dlg.querySelector('#hl-tag-in');
+  const draw = () => {
+    dlg.querySelector('.chosen').innerHTML = tags.map((t) => `<button type="button" class="tag on sm" data-rm="${esc(t)}" aria-label="Bỏ tag ${esc(t)}">${esc(t)} ×</button>`).join('');
+    const typed = normTag(tagIn.value);
+    const sugg = allTags.filter((t) => !tags.includes(t) && (!typed || t.includes(typed))).slice(0, 12);
+    dlg.querySelector('.sugg').innerHTML = sugg.map((t) => `<button type="button" class="tag sm" data-add="${esc(t)}">+ ${esc(t)}</button>`).join('');
+  };
+  const addTyped = () => {
+    for (const part of tagIn.value.split(',')) { const t = normTag(part); if (t && !tags.includes(t)) tags.push(t); }
+    tagIn.value = '';
+    draw();
+  };
+  tagIn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTyped(); }
+    else if (e.key === 'Backspace' && !tagIn.value && tags.length) { tags.pop(); draw(); }
+  });
+  tagIn.addEventListener('input', () => { if (tagIn.value.includes(',')) addTyped(); else draw(); });
+  dlg.addEventListener('click', (e) => {
+    const rm = e.target.closest('[data-rm]');
+    const add = e.target.closest('[data-add]');
+    if (rm) { tags = tags.filter((t) => t !== rm.dataset.rm); draw(); }
+    if (add) { tags.push(add.dataset.add); draw(); tagIn.focus(); }
+    if (e.target.closest('[data-x="cancel"]')) dlg.close('cancel');
+    if (e.target.closest('[data-x="del"]')) { dlg.close('del'); removeHighlight(rec.id); }
+  });
+  dlg.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    addTyped();
+    try {
+      await saveHighlight({ ...rec, note: dlg.querySelector('#hl-note').value, tags });
+      S.highlights = await loadHighlights();
+      dlg.close('save');
+      toast(isNew ? 'Đã lưu highlight' : 'Đã cập nhật highlight');
+      S.reader?.refreshHighlights();
+      if (!S.reader) renderView();
+    } catch { toast('Không lưu được highlight'); }
+  });
+  dlg.addEventListener('close', () => { dlg.remove(); S.reader?.stage?.focus({ preventScroll: true }); });
+  draw();
+  dlg.showModal();
+  if (isNew) dlg.querySelector('#hl-note').focus();
+}
+
 // ---------------- Màn Thống kê ----------------
 function renderStats() {
   const st = computeStats({
@@ -1214,16 +1410,22 @@ async function openBook(id) {
   const layout = (await getPref(`layout:${x.key}`)) || 'auto';
   const coverAlone = (await getPref(`coverAlone:${x.key}`)) ?? true;
   const p = S.progress[id];
+  const jump = S.jump && S.jump.id === id ? S.jump : null;
+  S.jump = null;
   app.innerHTML = '<div class="reader-host"></div>';
   const host = app.querySelector('.reader-host');
   const reader = new Reader(host, {
     title: displayTitle(b),
     subtitle: b.genre,
     kind, dir, layout, coverAlone,
-    startPage: p && !p.finished ? p.page : 1,
+    startPage: jump ? jump.page : (p && !p.finished ? p.page : 1),
+    flashId: jump?.flashId || null,
     onPosition: (pos) => savePosition(b, pos),
     onActivity: sessActivity,
     onPrefChange: (k, v) => setPref(`${k}:${x.key}`, v),
+    highlightsFor: (page) => highlightsOf(S.highlights, id, page),
+    onSelection: (action, sel) => onReaderSelection(b, action, sel),
+    onHighlightTap: (hid) => openHighlightEditor(S.highlights[hid]),
   });
   S.reader = reader;
   sessActivity();
@@ -1370,6 +1572,10 @@ async function onClick(e) {
     return;
   }
   if (a === 'stats-period') { S.statsPeriod = el.dataset.period; return renderStats(); }
+  if (a === 'hl-tag') { S.hlTag = S.hlTag === el.dataset.tag ? '' : el.dataset.tag; return renderHighlights(); }
+  if (a === 'hl-open') return openHighlightFromList(id);
+  if (a === 'hl-edit') return openHighlightEditor(S.highlights[id]);
+  if (a === 'hl-del') return removeHighlight(id);
   if (a === 'art-tag') { S.artTag = S.artTag === el.dataset.tag ? '' : el.dataset.tag; return renderArticles(); }
   if (a === 'art-edit') { const r = S.articles[id]; if (r) openArticleEditor({ url: r.url, title: r.title }); return; }
   if (a === 'art-del') {
@@ -1454,6 +1660,11 @@ async function onClick(e) {
 }
 
 function onInput(e) {
+  if (e.target.id === 'hl-q') {
+    S.hlQuery = e.target.value;
+    const list = app.querySelector('#hl-list');
+    if (list) list.innerHTML = hlListHtml();
+  }
   if (e.target.id === 'art-q') {
     S.artQuery = e.target.value;
     const list = app.querySelector('#art-list');

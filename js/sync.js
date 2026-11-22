@@ -1,5 +1,5 @@
 // Đồng bộ tiến độ, phiên đọc và tuỳ chọn từng bộ qua file ẩn trong Google Drive (appDataFolder).
-// Quy tắc gộp: tiến độ & tuỳ chọn lấy bản mới hơn theo updatedAt; phiên đọc gộp theo id.
+// Gồm cả bài viết, sách giấy và highlight. Quy tắc gộp: tiến độ & tuỳ chọn lấy bản mới hơn theo updatedAt; phiên đọc gộp theo id.
 import { db } from './db.js';
 import { readAppState, writeAppState } from './drive.js';
 import { getToken } from './auth.js';
@@ -34,12 +34,14 @@ export async function syncNow() {
       db.entries('progress'), db.all('sessions'), db.get('kv', 'prefs'), db.get('kv', 'articles'), db.get('kv', 'syncMeta'),
     ]);
     const localPaper = await db.get('kv', 'paper');
+    const localHl = await db.get('kv', 'highlights');
     const remote = await readAppState();
     const r = remote.data || {};
     const progress = mergeMap(Object.fromEntries(localProgress), r.progress);
     const prefs = mergeMap(localPrefs || {}, r.prefs);
     const articles = mergeMap(localArticles || {}, r.articles);
     const paper = mergeMap(localPaper || {}, r.paper);
+    const highlights = mergeMap(localHl || {}, r.highlights);
     const sessMap = new Map((r.sessions || []).map((s) => [s.id, s]));
     for (const s of localSessions) {
       const o = sessMap.get(s.id);
@@ -61,18 +63,21 @@ export async function syncNow() {
     Object.assign(prefs, mergeMap(prefs, await db.get('kv', 'prefs')));
     Object.assign(articles, mergeMap(articles, await db.get('kv', 'articles')));
     Object.assign(paper, mergeMap(paper, await db.get('kv', 'paper')));
+    Object.assign(highlights, mergeMap(highlights, await db.get('kv', 'highlights')));
+    await db.set('kv', 'highlights', highlights);
     await db.set('kv', 'paper', paper);
     await db.set('kv', 'prefs', prefs);
     await db.set('kv', 'articles', articles);
 
     // Ghi lên Drive nếu có thay đổi
-    const payload = { v: 1, progress: sortKeys(progress), prefs: sortKeys(prefs), articles: sortKeys(articles), paper: sortKeys(paper), sessions };
+    const payload = { v: 1, progress: sortKeys(progress), prefs: sortKeys(prefs), articles: sortKeys(articles), paper: sortKeys(paper), highlights: sortKeys(highlights), sessions };
     const remoteNorm = {
       v: 1,
       progress: sortKeys(r.progress || {}),
       prefs: sortKeys(r.prefs || {}),
       articles: sortKeys(r.articles || {}),
       paper: sortKeys(r.paper || {}),
+      highlights: sortKeys(r.highlights || {}),
       sessions: [...(r.sessions || [])].sort((a, b) => a.start - b.start),
     };
     let fileId = remote.fileId;
