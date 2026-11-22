@@ -424,6 +424,7 @@ export class Reader {
       clearTimeout(this.selHideTimer);
       this.sel = s;
       this.selBar.hidden = false;
+      this.placeSelBar();
       this.root.classList.add('has-sel');
       clearTimeout(this.hideTimer);
       this.root.classList.add('immersive');
@@ -432,6 +433,32 @@ export class Reader {
       clearTimeout(this.selHideTimer);
       this.selHideTimer = setTimeout(() => { if (!this.selBarBusy) this.hideSelBar(); }, 450);
     }
+  }
+
+  // Đặt thanh thao tác ngay dưới đoạn đã chọn (chừa chỗ cho 2 núm kéo của Android).
+  // Không đủ chỗ phía dưới thì đặt lên trên; vẫn không vừa thì về cuối màn hình.
+  placeSelBar() {
+    const bar = this.selBar;
+    const sel = window.getSelection();
+    if (bar.hidden || !sel || !sel.rangeCount) return;
+    const rects = [...sel.getRangeAt(0).getClientRects()].filter((r) => r.width > 0 && r.height > 0);
+    if (!rects.length) return;
+    const root = this.root.getBoundingClientRect();
+    const top = Math.min(...rects.map((r) => r.top)) - root.top;
+    const bottom = Math.max(...rects.map((r) => r.bottom)) - root.top;
+    const left = Math.min(...rects.map((r) => r.left)) - root.left;
+    const right = Math.max(...rects.map((r) => r.right)) - root.left;
+    const bw = bar.offsetWidth;
+    const bh = bar.offsetHeight;
+    const HANDLE = 40;
+    let y;
+    if (bottom + HANDLE + bh + 8 <= root.height) y = bottom + HANDLE;
+    else if (top - bh - 16 >= 8) y = top - bh - 16;
+    else { bar.classList.remove('float'); bar.style.left = ''; bar.style.top = ''; return; }
+    const x = Math.min(Math.max(8, (left + right) / 2 - bw / 2), Math.max(8, root.width - bw - 8));
+    bar.classList.add('float');
+    bar.style.left = `${Math.round(x)}px`;
+    bar.style.top = `${Math.round(y)}px`;
   }
 
   hideSelBar() {
@@ -586,7 +613,7 @@ export class Reader {
       const v = Number(this.slider.value);
       this.label.textContent = `${v} / ${this.total} · ${Math.round((v / this.total) * 100)}%`;
     }, sig);
-    this.stage.addEventListener('scroll', () => this.o.onActivity?.(), { ...sig, passive: true });
+    this.stage.addEventListener('scroll', () => { this.o.onActivity?.(); if (this.sel) this.placeSelBar(); }, { ...sig, passive: true });
 
     // Chọn chữ → thanh thao tác (Highlight · Ghi chú · Tìm Google · Sao chép)
     let selT = null;

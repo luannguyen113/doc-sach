@@ -286,6 +286,7 @@ dialog.sheet { max-height: 92dvh; overflow: auto; }
 .rd-selbar { position: absolute; left: 50%; transform: translateX(-50%); bottom: max(14px, calc(env(safe-area-inset-bottom) + 10px)); z-index: 7;
   display: flex; gap: 2px; padding: 4px; border-radius: 14px; background: var(--btn); color: var(--btn-text); box-shadow: 0 6px 24px rgb(0 0 0 / .25); max-width: calc(100% - 16px); }
 .rd-selbar[hidden] { display: none; }
+.rd-selbar.float { bottom: auto; transform: none; }
 .rd-selbar button { min-height: 48px; min-width: 48px; padding: 0 10px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
   border: none; border-radius: 10px; background: transparent; color: inherit; font: inherit; font-size: 11px; white-space: nowrap; cursor: pointer; -webkit-user-select: none; user-select: none; }
 .rd-selbar button:active { background: color-mix(in srgb, var(--btn-text) 15%, transparent); }
