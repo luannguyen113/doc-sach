@@ -304,3 +304,16 @@ dialog.sheet { max-height: 92dvh; overflow: auto; }
 .hl-note { margin: 0; font-size: 14px; color: var(--muted); white-space: pre-wrap; }
 .sheet-body textarea { min-height: 96px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
 .hl-sheet-quote { max-height: 30dvh; overflow: auto; }
+
+/* Đoạn tâm đắc (sách giấy) */
+.quotes { display: flex; flex-direction: column; gap: 10px; }
+.quotes .sec-head label.btn { cursor: pointer; }
+.quote-thumb { display: block; width: 100%; max-height: 22dvh; object-fit: contain; border-radius: 10px; background: var(--stage); }
+.sents { display: flex; flex-wrap: wrap; gap: 6px; max-height: 38dvh; overflow: auto; padding: 2px; }
+.sent { text-align: left; padding: 8px 10px; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 1.4; cursor: pointer; }
+.sent.para { margin-top: 8px; }
+.sent.on { background: rgb(250 204 21 / .35); border-color: rgb(202 138 4); }
+.linkish { padding: 0; min-height: 32px; border: none; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
+.hl-quote { white-space: pre-line; }
+.quote-sheet .sheet-actions { flex-wrap: wrap; justify-content: flex-end; }
+.quote-sheet .sheet-actions .btn { flex: 1 1 auto; }

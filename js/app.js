@@ -20,6 +20,7 @@ import {
 } from './highlights.js';
 import {
   loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, paperTitle, shrinkImage, readCoverText, pickGeminiModels, saveCover, fetchCover,
+  readPageText, splitSentences,
 } from './paper.js';
 
 const app = document.getElementById('app');
@@ -636,6 +637,7 @@ function renderPaperDetail(id) {
   const pct = paperPct(b);
   const logs = paperLogs(id);
   const totalMin = Math.round(logs.reduce((a, s) => a + s.activeSec, 0) / 60);
+  const quotes = highlightsOf(S.highlights, id).sort((a, b) => (a.page || 0) - (b.page || 0));
   app.innerHTML = `
     <div class="page">
       <header class="top"><div class="top-left"><a class="icon-btn" href="#/" aria-label="Về thư viện">${icon('back')}</a><span class="pill">Sách giấy</span></div>
@@ -664,6 +666,11 @@ function renderPaperDetail(id) {
     ? `<button type="button" class="btn ghost" data-action="paper-status" data-id="${esc(id)}" data-status="reading">Đọc tiếp</button>`
     : b.status === 'reading' ? `<button type="button" class="btn ghost" data-action="paper-status" data-id="${esc(id)}" data-status="dropped">Bỏ dở</button>` : ''}
         </div>
+        <section class="quotes" aria-label="Đoạn tâm đắc">
+          <div class="sec-head"><h2 class="h2">Đoạn tâm đắc</h2>
+            <label class="btn ghost sm">${icon('plus', 18)}Thêm từ ảnh<input type="file" accept="image/*" multiple class="visually-hidden" data-quote-photos="${esc(id)}"></label></div>
+          ${quotes.length ? quotes.map((h) => hlCardHtml(h, false)).join('') : '<p class="muted sm">Chụp các trang có đoạn anh tâm đắc (chụp nhiều rồi thêm một lần cũng được). App đọc chữ, anh chạm câu đầu – câu cuối để giữ đúng đoạn. Đã gạch chân hoặc tô bút thì app tự lấy phần đó.</p>'}
+        </section>
         <section aria-label="Các lần đọc"><h2 class="h2">Các lần đọc</h2>
           ${logs.length ? `<div class="card log-list">${logs.map((s) => `
             <div class="log">
@@ -1170,33 +1177,47 @@ function renderHighlights() {
     </div>`;
 }
 
+// Thẻ một highlight. inList: đang ở Ghi chép (bấm = mở sách); ngoài ra (trang sách giấy) bấm = sửa.
+function hlCardHtml(h, inList) {
+  const paper = h.source === 'paper';
+  const openAct = inList ? 'hl-open' : 'hl-edit';
+  const openLabel = inList ? (paper ? 'Mở trang sách giấy' : `Mở sách tới trang ${h.page}`) : 'Sửa đoạn tâm đắc';
+  return `
+      <article class="card hl">
+        <button type="button" class="hl-open" data-action="${openAct}" data-id="${esc(h.id)}" aria-label="${openLabel}">
+          <blockquote class="hl-quote">${esc(h.text)}</blockquote>
+          ${h.note ? `<p class="hl-note">${esc(h.note)}</p>` : ''}
+          <span class="muted xs tnum">${paper && inList ? '<span class="pill">Sách giấy</span> ' : ''}${h.page ? `Trang ${h.page} · ` : ''}${fmtDate(h.createdAt)}</span>
+        </button>
+        <div class="art-foot">
+          <div class="tags">${h.tags.map((t) => (inList ? `<button type="button" class="tag sm" data-action="hl-tag" data-tag="${esc(t)}">${esc(t)}</button>` : `<span class="tag sm">${esc(t)}</span>`)).join('') || '<span class="muted xs">Chưa có tag</span>'}</div>
+          <div class="art-actions">
+            <button type="button" class="icon-btn sm" data-action="hl-edit" data-id="${esc(h.id)}" aria-label="Sửa ghi chú và tag">${icon('edit', 18)}</button>
+            <button type="button" class="icon-btn sm" data-action="hl-del" data-id="${esc(h.id)}" aria-label="Xoá">${icon('trash', 18)}</button>
+          </div>
+        </div>
+      </article>`;
+}
+
 function hlListHtml() {
   const groups = groupByBook(filteredHighlights());
   if (!groups.length) return '<p class="muted sm">Không có highlight nào khớp.</p>';
   return groups.map((g) => `
     <section class="hl-group" aria-label="${esc(g.title)}">
       <div class="hl-group-head"><strong>${esc(g.title)}</strong><span class="muted xs tnum">${g.items.length} highlight</span></div>
-      ${g.items.map((h) => `
-      <article class="card hl">
-        <button type="button" class="hl-open" data-action="hl-open" data-id="${esc(h.id)}" aria-label="Mở sách tới trang ${h.page}">
-          <blockquote class="hl-quote">${esc(h.text)}</blockquote>
-          ${h.note ? `<p class="hl-note">${esc(h.note)}</p>` : ''}
-          <span class="muted xs tnum">Trang ${h.page} · ${fmtDate(h.createdAt)}</span>
-        </button>
-        <div class="art-foot">
-          <div class="tags">${h.tags.map((t) => `<button type="button" class="tag sm" data-action="hl-tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('') || '<span class="muted xs">Chưa có tag</span>'}</div>
-          <div class="art-actions">
-            <button type="button" class="icon-btn sm" data-action="hl-edit" data-id="${esc(h.id)}" aria-label="Sửa ghi chú và tag">${icon('edit', 18)}</button>
-            <button type="button" class="icon-btn sm" data-action="hl-del" data-id="${esc(h.id)}" aria-label="Xoá highlight">${icon('trash', 18)}</button>
-          </div>
-        </div>
-      </article>`).join('')}
+      ${g.items.map((h) => hlCardHtml(h, true)).join('')}
     </section>`).join('');
 }
 
 function openHighlightFromList(id) {
   const h = S.highlights[id];
   if (!h || h.deleted) return;
+  if (h.source === 'paper') {
+    const pb = S.paper[h.bookId];
+    if (!pb || pb.deleted) { toast('Sách giấy này đã bị xoá. Đoạn tâm đắc vẫn được giữ lại.'); return; }
+    location.hash = `#/paper/${encodeURIComponent(h.bookId)}`;
+    return;
+  }
   if (!bookById(h.bookId)) { toast('Sách này không còn trong thư mục Drive. Highlight vẫn được giữ lại.'); return; }
   S.jump = { id: h.bookId, page: h.page, flashId: h.id };
   location.hash = `#/read/${encodeURIComponent(h.bookId)}`;
@@ -1253,8 +1274,14 @@ function openHighlightEditor(rec) {
   dlg.innerHTML = `
     <form method="dialog" class="sheet-body">
       <h2 class="sheet-title">${isNew ? 'Highlight và ghi chú' : 'Sửa highlight'}</h2>
+      ${rec.source === 'paper' ? `
+      <p class="muted xs">${esc(rec.bookTitle)}</p>
+      <label for="hl-text">Đoạn tâm đắc</label>
+      <textarea id="hl-text" rows="5">${esc(rec.text)}</textarea>
+      <label for="hl-page">Trang</label>
+      <input id="hl-page" type="number" inputmode="numeric" min="1" value="${rec.page || ''}">` : `
       <p class="muted xs">${esc(rec.bookTitle)} · Trang <span class="tnum">${rec.page}</span></p>
-      <blockquote class="hl-quote hl-sheet-quote">${esc(rec.text)}</blockquote>
+      <blockquote class="hl-quote hl-sheet-quote">${esc(rec.text)}</blockquote>`}
       <label for="hl-note">Ghi chú</label>
       <textarea id="hl-note" rows="4" placeholder="Anh nghĩ gì về đoạn này?">${esc(rec.note || '')}</textarea>
       <label for="hl-tag-in">Tag</label>
@@ -1299,7 +1326,13 @@ function openHighlightEditor(rec) {
     e.preventDefault();
     addTyped();
     try {
-      await saveHighlight({ ...rec, note: dlg.querySelector('#hl-note').value, tags });
+      const extra = {};
+      if (rec.source === 'paper') {
+        extra.text = dlg.querySelector('#hl-text').value;
+        if (!extra.text.trim()) { toast('Đoạn tâm đắc đang trống'); return; }
+        extra.page = parseInt(dlg.querySelector('#hl-page').value, 10) || null;
+      }
+      await saveHighlight({ ...rec, ...extra, note: dlg.querySelector('#hl-note').value, tags });
       S.highlights = await loadHighlights();
       dlg.close('save');
       toast(isNew ? 'Đã lưu highlight' : 'Đã cập nhật highlight');
@@ -1311,6 +1344,194 @@ function openHighlightEditor(rec) {
   draw();
   dlg.showModal();
   if (isNew) dlg.querySelector('#hl-note').focus();
+}
+
+// ---------------- Đoạn tâm đắc từ ảnh chụp sách giấy ----------------
+// Chọn nhiều ảnh một lúc → Gemini đọc lần lượt (chạy trước ở nền) → mỗi ảnh: lấy phần đã đánh dấu bằng bút,
+// hoặc chạm câu đầu – câu cuối → ghi chú, tag → lưu như highlight (source 'paper'). Ảnh gốc không lưu lại.
+function openQuoteBatch(bookId, files) {
+  const pb = S.paper[bookId];
+  if (!pb) return;
+  if (!S.settings.geminiKey) { toast('Cần Gemini API key để đọc chữ từ ảnh (vào Cài đặt để nhập)'); return; }
+  const items = files.map((f) => ({ file: f, url: URL.createObjectURL(f), state: 'wait', res: null, err: '' }));
+  let idx = 0;
+  let saved = 0;
+  let closed = false;
+
+  // Đọc ảnh tuần tự ở nền, để ảnh kế tiếp thường đã xong khi anh chọn xong ảnh hiện tại.
+  const runOcr = async (it) => {
+    it.state = 'busy';
+    it.err = '';
+    try {
+      const blob = await shrinkImage(it.file, 2000, 0.85);
+      it.res = await readPageText(S.settings.geminiKey, blob);
+      it.state = 'ok';
+    } catch (err) { it.state = 'err'; it.err = err.message || 'Không đọc được ảnh'; }
+    if (!closed && items[idx] === it) { setupItem(); draw(); }
+  };
+  (async () => { for (const it of items) { if (closed) break; if (it.state === 'wait') await runOcr(it); } })();
+
+  document.querySelector('dialog.sheet')?.remove();
+  const dlg = document.createElement('dialog');
+  dlg.className = 'sheet quote-sheet';
+  dlg.setAttribute('aria-label', 'Thêm đoạn tâm đắc');
+  document.body.appendChild(dlg);
+  const allTags = tagCounts(activeHighlights(S.highlights)).map(([t]) => t);
+  let tags = [];
+  let sents = [];
+  let a = -1;
+  let b = -1;
+  let mode = 'pick'; // 'marked' | 'pick'
+
+  const fromRange = () => {
+    if (a < 0) return '';
+    const [lo, hi] = b < 0 ? [a, a] : [Math.min(a, b), Math.max(a, b)];
+    let out = '';
+    for (let i = lo; i <= hi; i += 1) out += (i > lo ? (sents[i].para !== sents[i - 1].para ? '\n\n' : ' ') : '') + sents[i].t;
+    return out;
+  };
+
+  const setupItem = () => {
+    const it = items[idx];
+    a = -1; b = -1;
+    sents = it.res ? splitSentences(it.res.text) : [];
+    mode = it.res?.markedText ? 'marked' : 'pick';
+  };
+
+  function draw() {
+    const it = items[idx];
+    const n = items.length;
+    const head = `<h2 class="sheet-title">Đoạn tâm đắc${n > 1 ? ` · ảnh <span class="tnum">${idx + 1}/${n}</span>` : ''}</h2>
+      <p class="muted xs">${esc(paperTitle(pb))}</p>
+      <img class="quote-thumb" src="${it.url}" alt="Ảnh trang sách đang xử lý">`;
+    let body;
+    if (it.state === 'wait' || it.state === 'busy') {
+      body = '<p class="muted sm" role="status">Đang đọc chữ trong ảnh… (khoảng 5–15 giây)</p>';
+    } else if (it.state === 'err') {
+      body = `<p class="form-err" role="alert">${esc(it.err)}</p>
+        <div class="pb-actions"><button type="button" class="btn" data-q="retry">Thử lại</button><button type="button" class="btn ghost" data-q="manual">Tự gõ đoạn này</button></div>`;
+    } else {
+      const marked = mode === 'marked';
+      const text = marked ? it.res.markedText : fromRange();
+      body = `
+        ${marked ? `<p class="sm"><strong>Đã lấy phần anh đánh dấu bằng bút.</strong> <button type="button" class="linkish" data-q="pick">Chọn lại từ cả trang</button></p>`
+        : `${it.res.markedText ? '<p class="sm"><button type="button" class="linkish" data-q="marked">Dùng phần đã đánh dấu bằng bút</button></p>' : ''}
+          <p class="muted xs">Chạm <strong>câu đầu</strong> rồi <strong>câu cuối</strong> của đoạn cần giữ. Chạm lại để chọn lại.</p>
+          <div class="sents" role="group" aria-label="Các câu trên trang">${sents.map((x, i) => {
+    const on = a >= 0 && (b < 0 ? i === a : i >= Math.min(a, b) && i <= Math.max(a, b));
+    const gap = i > 0 && sents[i - 1].para !== x.para ? ' para' : '';
+    return `<button type="button" class="sent${on ? ' on' : ''}${gap}" data-s="${i}" aria-pressed="${on}">${esc(x.t)}</button>`;
+  }).join('') || '<p class="muted sm">Không đọc được chữ nào trong ảnh.</p>'}</div>`}
+        <label for="q-text">Đoạn sẽ lưu (sửa được)</label>
+        <textarea id="q-text" rows="4" placeholder="Chưa chọn câu nào">${esc(text || '')}</textarea>`;
+    }
+    const ready = it.state === 'ok' || it.state === 'manual';
+    if (it.state === 'manual') {
+      body = `<label for="q-text">Đoạn tâm đắc</label><textarea id="q-text" rows="5" placeholder="Gõ hoặc dán đoạn chữ"></textarea>`;
+    }
+    dlg.innerHTML = `
+      <form class="sheet-body" novalidate>
+        ${head}
+        ${body}
+        ${ready ? `
+        <div class="two-col">
+          <div><label for="q-page">Trang</label><input id="q-page" type="number" inputmode="numeric" min="1" value="${it.res?.page || pb.page || ''}"></div>
+          <div></div>
+        </div>
+        <label for="q-note">Ghi chú</label>
+        <textarea id="q-note" rows="2" placeholder="Anh nghĩ gì về đoạn này?"></textarea>
+        <label for="q-tag-in">Tag</label>
+        <div class="tag-input"><span class="chosen"></span>
+          <input id="q-tag-in" type="text" placeholder="Gõ tag rồi Enter" autocomplete="off" autocapitalize="off" enterkeyhint="done"></div>
+        <div class="sugg" aria-label="Tag đã dùng"></div>` : ''}
+        <div class="sheet-actions">
+          <button type="button" class="btn ghost" data-q="skip">${idx + 1 < n ? 'Bỏ ảnh này' : 'Đóng'}</button>
+          ${ready ? `<button type="button" class="btn ghost" data-q="again">Lưu, chọn thêm ở ảnh này</button>
+          <button type="submit" class="btn primary">${idx + 1 < n ? 'Lưu & ảnh tiếp' : 'Lưu'}</button>` : ''}
+        </div>
+      </form>`;
+    if (ready) drawTags();
+  }
+
+  const drawTags = () => {
+    const tagIn = dlg.querySelector('#q-tag-in');
+    if (!tagIn) return;
+    dlg.querySelector('.chosen').innerHTML = tags.map((t) => `<button type="button" class="tag on sm" data-rm="${esc(t)}" aria-label="Bỏ tag ${esc(t)}">${esc(t)} ×</button>`).join('');
+    const typed = normTag(tagIn.value);
+    dlg.querySelector('.sugg').innerHTML = allTags.filter((t) => !tags.includes(t) && (!typed || t.includes(typed))).slice(0, 10)
+      .map((t) => `<button type="button" class="tag sm" data-add="${esc(t)}">+ ${esc(t)}</button>`).join('');
+  };
+  const addTyped = () => {
+    const tagIn = dlg.querySelector('#q-tag-in');
+    if (!tagIn) return;
+    for (const part of tagIn.value.split(',')) { const t = normTag(part); if (t && !tags.includes(t)) tags.push(t); }
+    tagIn.value = '';
+    drawTags();
+  };
+
+  const next = () => {
+    idx += 1;
+    tags = [];
+    if (idx >= items.length) { dlg.close(); return; }
+    setupItem();
+    draw();
+  };
+
+  const save = async (stay) => {
+    addTyped();
+    const text = (dlg.querySelector('#q-text')?.value || '').trim();
+    if (!text) { toast('Chưa có đoạn nào để lưu'); return; }
+    const page = parseInt(dlg.querySelector('#q-page')?.value, 10) || null;
+    try {
+      await saveHighlight({
+        source: 'paper', bookId, bookTitle: paperTitle(pb), genre: pb.genre, page, text, rects: [],
+        note: dlg.querySelector('#q-note')?.value || '', tags,
+      });
+      S.highlights = await loadHighlights();
+      saved += 1;
+      toast('Đã lưu đoạn tâm đắc');
+      if (stay) { a = -1; b = -1; mode = 'pick'; draw(); } else next();
+    } catch { toast('Không lưu được'); }
+  };
+
+  dlg.addEventListener('click', (e) => {
+    const s = e.target.closest('[data-s]');
+    if (s) {
+      const i = Number(s.dataset.s);
+      if (a < 0 || b >= 0) { a = i; b = -1; } else b = i;
+      const keepNote = dlg.querySelector('#q-note')?.value;
+      const keepPage = dlg.querySelector('#q-page')?.value;
+      addTyped();
+      draw();
+      if (keepNote != null) dlg.querySelector('#q-note').value = keepNote;
+      if (keepPage != null) dlg.querySelector('#q-page').value = keepPage;
+      return;
+    }
+    const q = e.target.closest('[data-q]')?.dataset.q;
+    const rm = e.target.closest('[data-rm]');
+    const add = e.target.closest('[data-add]');
+    if (rm) { tags = tags.filter((t) => t !== rm.dataset.rm); drawTags(); }
+    if (add) { tags.push(add.dataset.add); drawTags(); }
+    if (q === 'retry') { const it = items[idx]; it.state = 'busy'; draw(); runOcr(it); }
+    if (q === 'manual') { items[idx].state = 'manual'; draw(); dlg.querySelector('#q-text')?.focus(); }
+    if (q === 'pick' || q === 'marked') { mode = q; a = -1; b = -1; draw(); }
+    if (q === 'skip') next();
+    if (q === 'again') save(true);
+  });
+  dlg.addEventListener('keydown', (e) => {
+    if (e.target.id === 'q-tag-in' && (e.key === 'Enter' || e.key === ',')) { e.preventDefault(); addTyped(); }
+  });
+  dlg.addEventListener('input', (e) => { if (e.target.id === 'q-tag-in') { if (e.target.value.includes(',')) addTyped(); else drawTags(); } });
+  dlg.addEventListener('submit', (e) => { e.preventDefault(); save(false); });
+  dlg.addEventListener('close', () => {
+    closed = true;
+    items.forEach((it) => URL.revokeObjectURL(it.url));
+    dlg.remove();
+    if (saved) { scheduleSync(3000); if (!S.reader) renderView(); }
+  });
+  setupItem();
+  draw();
+  dlg.showModal();
 }
 
 // ---------------- Màn Thống kê ----------------
@@ -1673,6 +1894,13 @@ function onInput(e) {
 }
 
 async function onChange(e) {
+  const qp = e.target.closest?.('[data-quote-photos]');
+  if (qp) {
+    const files = [...(qp.files || [])];
+    qp.value = '';
+    if (files.length) openQuoteBatch(qp.dataset.quotePhotos, files);
+    return;
+  }
   const el = e.target.closest('[data-setting]');
   if (!el) return;
   S.settings[el.dataset.setting] = el.checked;

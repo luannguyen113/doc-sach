@@ -20,7 +20,7 @@ export function cleanText(s) {
   return String(s || '').replace(/-\s*\n\s*/g, '').replace(/\s+/g, ' ').trim();
 }
 
-// rec: { id?, bookId, bookTitle, genre, page, text, rects, note, tags }
+// rec: { id?, source?, bookId, bookTitle, genre, page, text, rects, note, tags }
 export async function saveHighlight(rec) {
   const map = await loadHighlights();
   const now = Date.now();
@@ -31,6 +31,7 @@ export async function saveHighlight(rec) {
     bookId: rec.bookId ?? prev?.bookId,
     bookTitle: rec.bookTitle ?? prev?.bookTitle ?? '',
     genre: rec.genre ?? prev?.genre ?? '',
+    source: rec.source ?? prev?.source ?? 'pdf', // 'pdf' | 'paper' (đoạn tâm đắc chụp từ sách giấy)
     page: rec.page ?? prev?.page ?? 1,
     text: cleanText(rec.text ?? prev?.text),
     rects: rec.rects ?? prev?.rects ?? [],

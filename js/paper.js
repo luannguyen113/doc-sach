@@ -125,14 +125,14 @@ async function markDead(model) {
   await db.set('kv', 'geminiDead', dead);
 }
 
-async function askModel(model, key, b64, outerSignal) {
+async function askModel(model, key, b64, outerSignal, job) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), PER_MODEL_TIMEOUT);
+  const timer = setTimeout(() => ctrl.abort(), job.timeout);
   const onOuter = () => ctrl.abort();
   outerSignal.addEventListener('abort', onOuter);
   const body = (thinking) => JSON.stringify({
-    contents: [{ parts: [{ inline_data: { mime_type: 'image/jpeg', data: b64 } }, { text: PROMPT }] }],
-    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: SCHEMA, ...(thinking ? { thinkingConfig: thinking } : {}) },
+    contents: [{ parts: [{ inline_data: { mime_type: 'image/jpeg', data: b64 } }, { text: job.prompt }] }],
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: job.schema, ...(thinking ? { thinkingConfig: thinking } : {}) },
   });
   const send = (thinking) => gem(`models/${model}:generateContent`, key, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body(thinking), signal: ctrl.signal,
@@ -151,7 +151,7 @@ async function askModel(model, key, b64, outerSignal) {
     if (!text) throw new Error(`${model} không trả kết quả`);
     return { ...JSON.parse(text), _model: model };
   } catch (e) {
-    if (e.name === 'AbortError') throw Object.assign(new Error(`${model} quá ${PER_MODEL_TIMEOUT / 1000} giây`), { status: 'timeout' });
+    if (e.name === 'AbortError') throw Object.assign(new Error(`${model} quá ${job.timeout / 1000} giây`), { status: 'timeout' });
     throw e;
   } finally {
     clearTimeout(timer);
@@ -161,11 +161,54 @@ async function askModel(model, key, b64, outerSignal) {
 
 // Chạy song song tối đa 3 model; model nào lỗi thì lập tức thay bằng model kế tiếp; lấy kết quả đầu tiên.
 const PARALLEL = 3;
-const DEADLINE = 30_000;
+const COVER_JOB = { prompt: PROMPT, schema: SCHEMA, timeout: PER_MODEL_TIMEOUT, deadline: 30_000, what: 'ảnh bìa' };
 
-export async function readCoverText(key, imageBlob) {
+export function readCoverText(key, imageBlob) {
+  return readImage(key, imageBlob, COVER_JOB);
+}
+
+// ---------- Đọc chữ một trang sách giấy (đoạn tâm đắc) ----------
+const PAGE_PROMPT = [
+  'Đây là ảnh chụp một trang sách giấy (có thể chụp nghiêng, có ngón tay hoặc mép trang khác lọt vào).',
+  'Trả về JSON:',
+  '- text: toàn bộ chữ phần thân của trang, đúng nguyên văn và đúng ngôn ngữ gốc (KHÔNG dịch, KHÔNG tóm tắt). Bỏ tiêu đề chạy đầu trang, số trang, chú thích chân trang, watermark, chữ của trang bên cạnh. Nối các dòng thành câu liền mạch; chữ bị ngắt dòng bằng gạch nối (ví dụ "com-" + "mercial") thì nối lại thành một chữ. Giữ ranh giới đoạn văn bằng một dòng trống (\n\n). Gạch đầu dòng viết thành đoạn riêng, bắt đầu bằng "• ".',
+  '- page: số trang in trên trang này (số nguyên), không thấy thì null.',
+  '- markedText: nếu có đoạn được đánh dấu bằng tay (gạch chân, tô bút dạ quang, khoanh, đóng ngoặc bên lề) thì chép đúng nguyên văn CHỈ phần được đánh dấu (nhiều chỗ thì nối bằng " … "); không có thì null.',
+].join('\n');
+
+const PAGE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    text: { type: 'STRING' },
+    page: { type: 'INTEGER', nullable: true },
+    markedText: { type: 'STRING', nullable: true },
+  },
+  required: ['text'],
+};
+
+const PAGE_JOB = { prompt: PAGE_PROMPT, schema: PAGE_SCHEMA, timeout: 45_000, deadline: 70_000, what: 'trang sách' };
+
+export function readPageText(key, imageBlob) {
+  return readImage(key, imageBlob, PAGE_JOB);
+}
+
+// Tách chữ thành câu để chạm chọn câu đầu – câu cuối. Giữ ranh giới đoạn (para).
+export function splitSentences(text) {
+  const out = [];
+  const seg = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter('vi', { granularity: 'sentence' }) : null;
+  String(text || '').split(/\n\s*\n/).forEach((para, pi) => {
+    const p = para.replace(/\s+/g, ' ').trim();
+    if (!p) return;
+    const parts = seg ? [...seg.segment(p)].map((x) => x.segment) : p.split(/(?<=[.!?…])\s+/);
+    for (const t of parts) { const v = t.trim(); if (v) out.push({ t: v, para: pi }); }
+  });
+  return out;
+}
+
+async function readImage(key, imageBlob, job) {
   if (!key) throw new Error('Chưa nhập Gemini API key (vào Cài đặt để nhập)');
-  if (!navigator.onLine) throw new Error('Đang offline, chưa đọc được ảnh bìa');
+  if (!navigator.onLine) throw new Error(`Đang offline, chưa đọc được ${job.what}`);
+  const DEADLINE = job.deadline;
   const models = await pickGeminiModels(key);
   if (!models.length) { await db.del('kv', 'geminiDead'); throw new Error('Không còn model Gemini nào dùng được, thử lại để app lấy danh sách mới.'); }
   const b64 = await toBase64(imageBlob);
@@ -182,11 +225,11 @@ export async function readCoverText(key, imageBlob) {
         while (!done && active < PARALLEL && next < models.length && Date.now() - start < DEADLINE) {
           const m = models[next++];
           active += 1;
-          askModel(m, key, b64, all.signal).then((r) => {
+          askModel(m, key, b64, all.signal, job).then((r) => {
             if (!done) { done = true; resolve(r); }
           }).catch(async (e) => {
             active -= 1;
-            notes.push(`${m.replace('gemini-', '')}: ${e.status === 'timeout' ? 'quá 20s' : e.status || 'lỗi'}`);
+            notes.push(`${m.replace('gemini-', '')}: ${e.status === 'timeout' ? 'quá giờ' : e.status || 'lỗi'}`);
             if (e.status === 404) await markDead(m);
             if (e.status === 400 || e.status === 403) { if (!done) { done = true; reject(e); } return; }
             launch();
@@ -200,8 +243,8 @@ export async function readCoverText(key, imageBlob) {
   } catch (err) {
     if (err instanceof Error) { await db.del('kv', 'geminiModels'); throw err; }
     const list = err.join(' · ');
-    if (err.length && err.every((x) => /quá 20s|503|429/.test(x))) throw new Error(`Gemini đang quá tải (${list}). Thử lại sau hoặc nhập tay.`);
-    throw new Error(`Không đọc được ảnh bìa (${list})`);
+    if (err.length && err.every((x) => /quá giờ|503|429/.test(x))) throw new Error(`Gemini đang quá tải (${list}). Thử lại sau hoặc nhập tay.`);
+    throw new Error(`Không đọc được ${job.what} (${list})`);
   } finally {
     all.abort();
   }
