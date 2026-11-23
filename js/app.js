@@ -620,6 +620,21 @@ function paperContinueCard(b) {
 
 const paperLogs = (id) => S.sessions.filter((s) => s.bookId === id && s.kind === 'paper' && !s.deleted).sort((a, b) => b.end - a.end);
 
+// Tốc độ tham chiếu = lần đọc GẦN NHẤT có số phút nhập tay (lần tự tính không làm tham chiếu).
+// Cuốn này chưa có thì lấy theo các tập khác cùng bộ (truyện nhiều tập).
+const isManualLog = (s) => !s.estMin && s.pages > 0 && s.activeSec > 0;
+function paperPace(b) {
+  const pick = (logs) => logs.filter(isManualLog).sort((x, y) => y.end - x.end || (y.rev || 0) - (x.rev || 0))[0];
+  let ref = pick(paperLogs(b.id));
+  let scope = 'book';
+  if (!ref && b.series) {
+    ref = pick(S.sessions.filter((s) => s.kind === 'paper' && !s.deleted && s.series === b.series && s.bookId !== b.id));
+    scope = 'series';
+  }
+  return ref ? { secPerPage: ref.activeSec / ref.pages, ref, scope } : null;
+}
+const fmtPace = (secPerPage) => `${(secPerPage / 60).toLocaleString('vi-VN', { maximumFractionDigits: 1 })} phút/trang`;
+
 function toDateInput(ts) {
   const d = new Date(ts);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -677,7 +692,7 @@ function renderPaperDetail(id) {
           ${logs.length ? `<div class="card log-list">${logs.map((s) => `
             <div class="log">
               <div><strong class="tnum">${fmtDay(s.end)}</strong>
-                <span class="muted sm tnum">Trang ${s.fromPage || 0} → ${s.toPage} (+${s.pages} trang) · ${Math.round(s.activeSec / 60)} phút</span></div>
+                <span class="muted sm tnum">Trang ${s.fromPage || 0} → ${s.toPage} (+${s.pages} trang) · ${s.estMin ? `≈${Math.round(s.activeSec / 60)} phút (tự tính)` : `${Math.round(s.activeSec / 60)} phút`}</span></div>
               <button type="button" class="icon-btn sm" data-action="paper-log-del" data-id="${esc(s.id)}" aria-label="Xoá lần đọc ngày ${fmtDay(s.end)}">${icon('trash', 18)}</button>
             </div>`).join('')}</div>` : '<p class="muted sm">Chưa có lần đọc nào. Đọc xong một buổi thì bấm “Ghi lần đọc”.</p>'}
         </section>
@@ -868,14 +883,18 @@ function openLogDialog(id) {
   const dlg = document.createElement('dialog');
   dlg.className = 'sheet';
   dlg.setAttribute('aria-label', 'Ghi lần đọc');
+  const pace = paperPace(b);
+  const fromPage = b.page || 0;
+  const estimate = (toPage) => (pace && toPage > fromPage ? Math.min(720, Math.max(1, Math.round(((toPage - fromPage) * pace.secPerPage) / 60))) : null);
   dlg.innerHTML = `
     <form class="sheet-body" novalidate>
       <h2 class="sheet-title">Ghi lần đọc</h2>
-      <p class="muted sm">${esc(b.title)} · đang ở trang <span class="tnum">${b.page || 0} / ${b.totalPages}</span></p>
+      <p class="muted sm">${esc(b.title)} · đang ở trang <span class="tnum">${fromPage} / ${b.totalPages}</span></p>
       <label for="lg-page">Đọc đến trang *</label>
       <input id="lg-page" type="number" inputmode="numeric" min="1" max="${b.totalPages}" autocomplete="off">
-      <label for="lg-min">Thời gian đọc (phút) *</label>
-      <input id="lg-min" type="number" inputmode="numeric" min="1" max="720" autocomplete="off">
+      <label for="lg-min">Thời gian đọc (phút)${pace ? '' : ' *'}</label>
+      <input id="lg-min" type="number" inputmode="numeric" min="1" max="720" autocomplete="off" ${pace ? 'placeholder="Để trống: app tự tính"' : ''}>
+      ${pace ? `<p class="muted xs lg-hint tnum" aria-live="polite"></p>` : ''}
       <label for="lg-date">Ngày đọc</label>
       <input id="lg-date" type="date" value="${toDateInput(Date.now())}" max="${toDateInput(Date.now())}">
       <p class="form-err" role="alert"></p>
@@ -887,19 +906,41 @@ function openLogDialog(id) {
   document.body.appendChild(dlg);
   const $ = (q) => dlg.querySelector(q);
   dlg.addEventListener('click', (e) => { if (e.target.closest('[data-x="cancel"]')) dlg.close(); });
+  const refText = pace ? `${fmtPace(pace.secPerPage)}, theo lần ghi ${fmtDay(pace.ref.end)}${pace.scope === 'series' ? ` (tập ${pace.ref.vol})` : ''}` : '';
+  const updateHint = () => {
+    if (!pace) return;
+    const est = estimate(parseInt($('#lg-page').value, 10));
+    const typed = $('#lg-min').value.trim();
+    $('.lg-hint').textContent = typed
+      ? 'Số phút anh nhập sẽ thành tốc độ tham chiếu mới.'
+      : est ? `Tự tính ≈ ${est} phút · tốc độ ${refText}` : `Tốc độ ${refText}. Nhập trang để app tự tính số phút.`;
+  };
+  $('#lg-page').addEventListener('input', updateHint);
+  $('#lg-min').addEventListener('input', updateHint);
+  updateHint();
   $('form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const err = $('.form-err');
     const toPage = parseInt($('#lg-page').value, 10);
-    const minutes = parseInt($('#lg-min').value, 10);
+    const typed = $('#lg-min').value.trim();
     if (!(toPage >= 1 && toPage <= b.totalPages)) { err.textContent = `Trang phải từ 1 đến ${b.totalPages}.`; return; }
+    let minutes = parseInt(typed, 10);
+    let estMin = false;
+    if (!typed) {
+      minutes = estimate(toPage);
+      estMin = true;
+      if (!minutes) {
+        err.textContent = pace ? 'Trang mới không lớn hơn trang hiện tại nên không tự tính được – nhập số phút.' : 'Lần đầu ghi cuốn này: nhập số phút để app biết tốc độ đọc của anh.';
+        return;
+      }
+    }
     if (!(minutes >= 1 && minutes <= 720)) { err.textContent = 'Nhập số phút đọc (1–720).'; return; }
     const end = $('#lg-date').value ? fromDateInput($('#lg-date').value) : Date.now();
-    const fromPage = b.page || 0;
     const rec = {
       id: crypto.randomUUID(), kind: 'paper', bookId: b.id, title: paperTitle(b), genre: b.genre, series: b.series || null, vol: b.volume || null,
       start: end - minutes * 60_000, end, rev: Date.now(), activeSec: minutes * 60,
       pages: Math.max(0, toPage - fromPage), fromPage, toPage, device: 'Sách giấy',
+      ...(estMin ? { estMin: true } : {}),
     };
     await db.set('sessions', null, rec);
     S.sessions.push(rec);
@@ -910,7 +951,7 @@ function openLogDialog(id) {
     S.paper[id] = await savePaperBook(b);
     scheduleSync(5000);
     dlg.close();
-    toast(b.status === 'done' ? 'Đã ghi – đã đọc xong cuốn này' : `Đã ghi +${rec.pages} trang, ${minutes} phút`);
+    toast(b.status === 'done' ? 'Đã ghi – đã đọc xong cuốn này' : `Đã ghi +${rec.pages} trang, ${estMin ? `≈${minutes} phút (tự tính)` : `${minutes} phút`}`);
     renderView();
   });
   dlg.addEventListener('close', () => dlg.remove());

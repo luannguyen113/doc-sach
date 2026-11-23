@@ -1,5 +1,5 @@
 // Service worker: lưu vỏ app để mở được khi offline. Sách lưu riêng trong bộ nhớ của app (OPFS), không qua đây.
-const VERSION = 'v1.9.0';
+const VERSION = 'v1.9.1';
 const SHELL = `shell-${VERSION}`;
 const VENDOR = 'vendor-pdfjs-6.5.438';
 
