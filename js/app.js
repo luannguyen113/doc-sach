@@ -23,6 +23,7 @@ import {
   loadPaper, savePaperBook, deletePaperBook, activePaper, newPaperId, paperTitle, shrinkImage, readCoverText, pickGeminiModels, saveCover, fetchCover,
   readPageText, splitSentences,
 } from './paper.js';
+import { loadRatings, saveRating, markPending, deleteRating, ratingOf, rKey } from './ratings.js';
 
 const app = document.getElementById('app');
 
@@ -51,6 +52,8 @@ const S = {
   statsPeriod: 'month',
   paper: {},
   highlights: {},
+  ratings: {},
+  pendingRate: null, // sách vừa đọc xong, chờ hỏi đánh giá khi rời trình đọc: { target, askLast }
   hlTag: '',
   hlQuery: '',
   jump: null, // mở sách tới đúng trang của một highlight: { id, page, flashId }
@@ -73,6 +76,7 @@ async function boot() {
   S.articles = articles;
   S.paper = await loadPaper();
   S.highlights = await loadHighlights();
+  S.ratings = await loadRatings();
   const gk = await getPref('geminiKey');
   if (gk != null && !S.settings.geminiKey) S.settings.geminiKey = gk;
   if (settings) S.settings = { ...S.settings, ...settings };
@@ -145,6 +149,7 @@ async function reloadFromDb() {
   S.articles = a;
   S.paper = await loadPaper();
   S.highlights = await loadHighlights();
+  S.ratings = await loadRatings();
   S.reader?.refreshHighlights();
   const gk = await getPref('geminiKey');
   if (gk != null) S.settings.geminiKey = gk;
@@ -580,13 +585,13 @@ function paperSeriesCard(g) {
     || vols.find((v) => v.status === 'reading');
   return `<div class="card series">
     <button type="button" class="series-head" data-action="toggle" data-key="${esc(key)}" aria-expanded="${open}">
-      <span class="t">${esc(g.paperSeries)}</span><span class="pill">Sách giấy</span>
+      <span class="t">${esc(g.paperSeries)}</span>${ratePill(rKey.paperSeries(g.paperSeries))}<span class="pill">Sách giấy</span>
       <span class="muted sm tnum">${done} / ${vols.length} tập xong</span>
       ${icon('chevron', 18)}
     </button>
     <div class="segs" style="grid-template-columns:repeat(${vols.length},minmax(0,1fr))">${vols.map((v) => `<i class="${v.status === 'done' ? 'done' : v.status === 'reading' && v.page ? 'cur' : ''}" title="Tập ${v.volume || '?'}"></i>`).join('')}</div>
     ${!open && cur ? `<div class="row-end"><span class="muted sm">${cur.page ? `Đang đọc: Tập ${cur.volume || '?'} · trang ${cur.page}/${cur.totalPages}` : `Tiếp theo: Tập ${cur.volume || '?'}`}</span><a class="btn ghost sm" href="#/paper/${encodeURIComponent(cur.id)}">Mở</a></div>` : ''}
-    ${open ? `<div class="vols">${vols.map((v) => paperRow(v, true)).join('')}</div>` : ''}
+    ${open ? `<div class="vols">${vols.map((v) => paperRow(v, true)).join('')}</div>${seriesRateRow('paper', vols[0].id, rKey.paperSeries(g.paperSeries))}` : ''}
   </div>`;
 }
 const pts = (p) => p.lastReadAt || p.updatedAt || 0;
@@ -601,7 +606,7 @@ function paperRow(b, inSeries) {
       <span class="muted sm tnum">${esc(st)}${b.author && !inSeries ? ` · ${esc(b.author)}` : ''}</span>
       ${b.status === 'reading' && b.page ? bar(pct) : ''}</span>
     </a>
-    ${inSeries ? '' : '<span class="badges"><span class="pill">Sách giấy</span></span>'}
+    ${inSeries ? '' : `<span class="badges">${rateBadge('paper', b.id, paperTarget(b).key, b.status === 'done')}<span class="pill">Sách giấy</span></span>`}
   </div>`;
 }
 
@@ -670,6 +675,7 @@ function renderPaperDetail(id) {
             ${bar(pct)}
           </div>
         </section>
+        ${rateCard(b)}
         <section class="card pb-facts">
           <div><span class="muted xs">Bắt đầu</span><strong class="tnum">${fmtDay(b.startedAt)}</strong></div>
           <div><span class="muted xs">Đọc xong</span><strong class="tnum">${b.finishedAt ? fmtDay(b.finishedAt) : '—'}</strong></div>
@@ -678,6 +684,7 @@ function renderPaperDetail(id) {
         </section>
         <div class="pb-actions">
           <button type="button" class="btn primary" data-action="paper-log" data-id="${esc(id)}">Ghi lần đọc</button>
+          ${ratingOf(S.ratings, paperTarget(b).key)?.score ? '' : `<button type="button" class="btn ghost" data-action="rate" data-src="paper" data-id="${esc(id)}">${b.series ? 'Đánh giá bộ' : 'Đánh giá'}</button>`}
           ${b.series ? `<button type="button" class="btn ghost" data-action="paper-next-vol" data-id="${esc(id)}">${icon('plus', 18)}Thêm tập ${(b.volume || 0) + 1}</button>` : ''}
           ${b.status === 'dropped'
     ? `<button type="button" class="btn ghost" data-action="paper-status" data-id="${esc(id)}" data-status="reading">Đọc tiếp</button>`
@@ -852,6 +859,7 @@ function openPaperEditor(rec, preset) {
       startedAt: $('#pb-start').value ? fromDateInput($('#pb-start').value) : b.startedAt,
     };
     delete next.isbn;
+    const becameDone = !isNew && b.status !== 'done' && $('#pb-status').value === 'done';
     if (!isNew) {
       next.status = $('#pb-status').value;
       const endV = $('#pb-end').value;
@@ -867,6 +875,7 @@ function openPaperEditor(rec, preset) {
     dlg.close();
     toast(isNew ? 'Đã thêm sách giấy' : 'Đã lưu');
     if (isNew) location.hash = `#/paper/${encodeURIComponent(next.id)}`; else renderView();
+    if (becameDone) promptPaperFinished(S.paper[next.id]);
     if (coverBlob) {
       const fid = await saveCover(next.id, coverBlob);
       if (fid) S.paper[next.id] = await savePaperBook({ ...S.paper[next.id], coverFileId: fid });
@@ -944,6 +953,7 @@ function openLogDialog(id) {
     };
     await db.set('sessions', null, rec);
     S.sessions.push(rec);
+    const wasDone = b.status === 'done';
     b.page = toPage;
     b.lastReadAt = Math.max(b.lastReadAt || 0, end);
     if (toPage >= b.totalPages) { b.status = 'done'; b.finishedAt = b.finishedAt || end; }
@@ -953,10 +963,163 @@ function openLogDialog(id) {
     dlg.close();
     toast(b.status === 'done' ? 'Đã ghi – đã đọc xong cuốn này' : `Đã ghi +${rec.pages} trang, ${estMin ? `≈${minutes} phút (tự tính)` : `${minutes} phút`}`);
     renderView();
+    if (!wasDone && b.status === 'done') promptPaperFinished(b);
   });
   dlg.addEventListener('close', () => dlg.remove());
   dlg.showModal();
   $('#lg-page').focus();
+}
+
+// ---------------- Đánh giá (điểm nguyên 1–10 + nhận xét) ----------------
+// Bộ nhiều tập: chấm cho cả bộ. Sách lẻ: chấm cho cuốn đó.
+function pdfTarget(b) {
+  const x = info(b);
+  return x.series
+    ? { key: rKey.pdfSeries(b.genre, x.series), title: x.series, scope: 'series', source: 'pdf' }
+    : { key: rKey.pdfBook(b.id), title: x.title, scope: 'book', source: 'pdf' };
+}
+function paperTarget(b) {
+  return b.series
+    ? { key: rKey.paperSeries(b.series), title: b.series, scope: 'series', source: 'paper' }
+    : { key: rKey.paperBook(b.id), title: b.title, scope: 'book', source: 'paper' };
+}
+const paperHasNextVol = (b) => activePaper(S.paper).some((o) => o.series === b.series && (o.volume || 0) > (b.volume || 0));
+
+// Nhãn trên đầu thẻ bộ truyện (không bấm được vì nằm trong nút mở/thu bộ).
+function ratePill(key) {
+  const r = ratingOf(S.ratings, key);
+  if (!r) return '';
+  return r.score
+    ? `<span class="pill rate tnum" aria-label="Điểm ${r.score} trên 10">${r.score}/10</span>`
+    : '<span class="pill rate pending">Chưa đánh giá</span>';
+}
+// Nút trên thẻ sách lẻ: điểm (bấm để sửa) / "Chưa đánh giá" / "Đánh giá" khi đã đọc xong.
+function rateBadge(src, id, key, finished) {
+  const r = ratingOf(S.ratings, key);
+  const attrs = `data-action="rate" data-src="${src}" data-id="${esc(id)}"`;
+  if (r?.score) return `<button type="button" class="pill rate tnum" ${attrs} aria-label="Điểm ${r.score} trên 10 – bấm để sửa">${r.score}/10</button>`;
+  if (r?.pending) return `<button type="button" class="pill rate pending" ${attrs}>Chưa đánh giá</button>`;
+  return finished ? `<button type="button" class="btn ghost sm" ${attrs}>Đánh giá</button>` : '';
+}
+// Dòng đánh giá cả bộ, hiện khi mở rộng thẻ bộ truyện.
+function seriesRateRow(src, anyId, key) {
+  const r = ratingOf(S.ratings, key);
+  const label = r?.score ? 'Sửa đánh giá bộ' : 'Đánh giá bộ';
+  const note = r?.score ? `Cả bộ: <strong class="tnum">${r.score}/10</strong>${r.comment ? ` · ${esc(r.comment.slice(0, 80))}${r.comment.length > 80 ? '…' : ''}` : ''}` : 'Chấm điểm cho cả bộ';
+  return `<div class="row-end rate-row"><span class="muted sm">${note}</span><button type="button" class="btn ghost sm" data-action="rate" data-src="${src}" data-id="${esc(anyId)}">${label}</button></div>`;
+}
+// Thẻ điểm trong trang chi tiết sách giấy.
+function rateCard(b) {
+  const t = paperTarget(b);
+  const r = ratingOf(S.ratings, t.key);
+  if (!r?.score) return '';
+  return `<section class="card rate-card" aria-label="Đánh giá">
+    <div class="rate-head"><span class="big tnum">${r.score}<span class="muted sm">/10</span></span>
+      <span class="muted sm">${t.scope === 'series' ? `Đánh giá cả bộ ${esc(t.title)}` : 'Đánh giá của anh'} · ${fmtDay(r.ratedAt || r.updatedAt)}</span>
+      <button type="button" class="btn ghost sm" data-action="rate" data-src="paper" data-id="${esc(b.id)}">Sửa</button></div>
+    ${r.comment ? `<p class="rate-comment">${esc(r.comment)}</p>` : ''}
+  </section>`;
+}
+
+// Đọc xong: sách lẻ → hỏi chấm điểm; tập truyện mà thư viện chưa có tập sau → hỏi "tập cuối?"; còn tập sau → không hỏi.
+function finishPrompt(target, isVolume, hasNext) {
+  if (isVolume && hasNext) return null;
+  return { target, askLast: isVolume };
+}
+// PDF: đánh dấu chờ ngay (phòng khi tắt app giữa chừng), hỏi khi lật quá trang cuối hoặc khi về thư viện.
+function queuePdfFinished(b) {
+  const p = finishPrompt(pdfTarget(b), Boolean(info(b).series), Boolean(nextVolume(b)));
+  if (!p) return;
+  S.pendingRate = p;
+  if (!p.askLast) markPending(p.target).then((m) => { S.ratings[m.key] = m; }).catch(() => {});
+}
+function showPendingRate() {
+  const p = S.pendingRate;
+  S.pendingRate = null;
+  if (p) openRatingDialog(p.target, { fromFinish: true, askLast: p.askLast });
+}
+function promptPaperFinished(b) {
+  const p = b && finishPrompt(paperTarget(b), Boolean(b.series), paperHasNextVol(b));
+  if (p) setTimeout(() => openRatingDialog(p.target, { fromFinish: true, askLast: p.askLast }), 150);
+}
+
+function openRatingDialog(target, { fromFinish = false, askLast = false } = {}) {
+  const had = ratingOf(S.ratings, target.key);
+  let score = had?.score || 0;
+  let stage = askLast ? 'ask' : 'rate';
+  let settled = false; // đã Lưu / Xoá / trả lời "còn tập sau"
+  document.querySelector('dialog.sheet')?.remove();
+  const dlg = document.createElement('dialog');
+  dlg.className = 'sheet';
+  dlg.setAttribute('aria-label', 'Đánh giá');
+  const askHtml = () => `
+    <div class="sheet-body">
+      <h2 class="sheet-title">Đã đọc xong tập này</h2>
+      <p>Đây có phải tập cuối của bộ <strong>${esc(target.title)}</strong>?</p>
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" data-x="not-last">Chưa, còn tập sau</button>
+        <button type="button" class="btn primary" data-x="is-last">Đúng, đánh giá bộ</button>
+      </div>
+    </div>`;
+  const nums = Array.from({ length: 10 }, (_, i) => i + 1);
+  const rateHtml = () => `
+    <form class="sheet-body" novalidate>
+      <h2 class="sheet-title">${fromFinish ? 'Đọc xong rồi – anh chấm mấy điểm?' : had?.score ? 'Sửa đánh giá' : 'Đánh giá'}</h2>
+      <p class="muted sm">${esc(target.title)}${target.scope === 'series' ? ' · cả bộ' : ''}${had?.score && fromFinish ? ` · lần trước ${had.score}/10` : ''}</p>
+      <fieldset class="score-pick">
+        <legend>Điểm từ 1 đến 10 *</legend>
+        <div class="score-grid">${nums.map((n) => `<button type="button" class="score tnum" data-score="${n}" aria-pressed="${n === score}">${n}</button>`).join('')}</div>
+      </fieldset>
+      <label for="rt-comment">Nhận xét</label>
+      <textarea id="rt-comment" placeholder="Không bắt buộc">${esc(had?.comment || '')}</textarea>
+      <p class="form-err" role="alert"></p>
+      <div class="sheet-actions">
+        ${had?.score && !fromFinish ? '<button type="button" class="btn ghost danger rate-del" data-x="del">Xoá đánh giá</button>' : ''}
+        <button type="button" class="btn ghost" data-x="later">${fromFinish ? 'Để sau' : 'Huỷ'}</button>
+        <button type="submit" class="btn primary">Lưu</button>
+      </div>
+    </form>`;
+  const draw = () => {
+    dlg.innerHTML = stage === 'ask' ? askHtml() : rateHtml();
+    const form = dlg.querySelector('form');
+    if (form) form.addEventListener('submit', onSubmit);
+  };
+  const after = async () => {
+    S.ratings = await loadRatings();
+    if (!S.reader) renderView();
+  };
+  async function onSubmit(e) {
+    e.preventDefault();
+    if (!score) { dlg.querySelector('.form-err').textContent = 'Chọn điểm từ 1 đến 10.'; return; }
+    await saveRating(target, score, dlg.querySelector('#rt-comment').value);
+    settled = true;
+    dlg.close();
+    toast(`Đã lưu đánh giá ${score}/10`);
+  }
+  dlg.addEventListener('click', async (e) => {
+    const sc = e.target.closest('[data-score]');
+    if (sc) {
+      score = Number(sc.dataset.score);
+      dlg.querySelectorAll('[data-score]').forEach((x) => x.setAttribute('aria-pressed', String(Number(x.dataset.score) === score)));
+      dlg.querySelector('.form-err').textContent = '';
+      return;
+    }
+    const x = e.target.closest('[data-x]')?.dataset.x;
+    if (x === 'not-last') { settled = true; dlg.close(); }
+    else if (x === 'is-last') { stage = 'rate'; draw(); dlg.querySelector('[data-score]')?.focus(); }
+    else if (x === 'later') dlg.close();
+    else if (x === 'del') { await deleteRating(target.key); settled = true; dlg.close(); toast('Đã xoá đánh giá'); }
+  });
+  // Đóng mà chưa lưu (Để sau, vuốt/bấm ra ngoài) sau khi đọc xong → gắn nhãn "Chưa đánh giá".
+  dlg.addEventListener('close', async () => {
+    dlg.remove();
+    if (fromFinish && !settled && stage === 'rate') await markPending(target);
+    await after();
+    if (S.pendingReload && !S.reader) setTimeout(() => location.reload(), 300);
+  });
+  draw();
+  document.body.appendChild(dlg);
+  dlg.showModal();
 }
 
 function seriesCard(g) {
@@ -972,13 +1135,13 @@ function seriesCard(g) {
   const current = items.find((i) => S.progress[i.id] && !isFinished(i.id)) || items.find((i) => !isFinished(i.id));
   return `<div class="card series">
     <button type="button" class="series-head" data-action="toggle" data-key="${esc(key)}" aria-expanded="${open}">
-      <span class="t">${esc(g.series)}</span>
+      <span class="t">${esc(g.series)}</span>${ratePill(pdfTarget(items[0]).key)}
       <span class="muted sm tnum">${done} / ${items.length} tập xong</span>
       ${icon('chevron', 18)}
     </button>
     <div class="segs" style="grid-template-columns:repeat(${items.length},minmax(0,1fr))">${segs}</div>
     ${current && !open ? `<div class="row-end"><span class="muted sm">Tiếp theo: Tập ${current.vol}</span><span class="badges">${offlineBadge(current, false)}</span><a class="btn ghost sm" href="#/read/${encodeURIComponent(current.id)}">Đọc</a></div>` : ''}
-    ${open ? `<div class="vols">${items.map((i) => bookRow(i, true)).join('')}</div>` : ''}
+    ${open ? `<div class="vols">${items.map((i) => bookRow(i, true)).join('')}</div>${seriesRateRow('pdf', items[0].id, pdfTarget(items[0]).key)}` : ''}
   </div>`;
 }
 
@@ -992,7 +1155,7 @@ function bookRow(b, inSeries) {
       <span class="muted sm tnum">${esc(progressText(b))} · ${fmtMB(b.size)}</span>
       ${p && !p.finished ? bar(pct) : ''}</span>
     </a>
-    <span class="badges">${offlineBadge(b, false)}</span>
+    <span class="badges">${inSeries ? '' : rateBadge('pdf', b.id, pdfTarget(b).key, Boolean(p?.finished))}${offlineBadge(b, false)}</span>
   </div>`;
 }
 
@@ -1802,11 +1965,17 @@ async function openBook(id) {
   }
 }
 
-// Truyện tranh: lật tiếp ở trang cuối → mở tập kế tiếp của bộ; hết bộ thì báo kết thúc.
+// Ở trang cuối mà vẫn lật tiếp: truyện tranh có tập sau → mở tập sau; vừa đọc xong → hỏi đánh giá;
+// truyện tranh hết bộ → báo kết thúc.
 function onReachEnd(b) {
-  if (!S.reader || S.readingId !== b.id || S.reader.o.kind !== 'manga') return;
-  const n = nextVolume(b);
-  if (!n) { toast('Đã kết thúc, vui lòng đọc cuốn khác'); return; }
+  if (!S.reader || S.readingId !== b.id) return;
+  const manga = S.reader.o.kind === 'manga';
+  const n = manga ? nextVolume(b) : null;
+  if (!n) {
+    if (S.pendingRate) showPendingRate();
+    else if (manga) toast('Đã kết thúc, vui lòng đọc cuốn khác');
+    return;
+  }
   toast(`Đang mở Tập ${n.vol}…`);
   location.replace(`#/read/${encodeURIComponent(n.id)}`); // thay chỗ trong lịch sử: nút Back vẫn về thư viện
 }
@@ -1829,6 +1998,7 @@ async function savePosition(b, pos) {
   sessPage(pos.page);
   if (pos.last !== pos.page) sessPage(pos.last);
   const prev = S.progress[b.id];
+  if (pos.finished && !prev?.finished) queuePdfFinished(b);
   const finished = pos.finished || Boolean(prev?.finished); // đã đọc xong thì giữ trạng thái xong
   const now = Date.now();
   const finishedAt = finished ? (prev?.finishedAt || (prev?.finished ? prev.updatedAt : now)) : null;
@@ -1863,7 +2033,8 @@ function closeReader() {
   S.readingId = null;
   syncNow().catch(() => {});
   runPolicy();
-  if (S.pendingReload) setTimeout(() => location.reload(), 300);
+  if (S.pendingRate) setTimeout(showPendingRate, 250); // về thư viện rồi mới hỏi đánh giá
+  else if (S.pendingReload) setTimeout(() => location.reload(), 300);
 }
 
 // ---------------- Sự kiện ----------------
@@ -1882,6 +2053,11 @@ async function onClick(e) {
     return;
   }
   if (a === 'paper-log') return openLogDialog(id);
+  if (a === 'rate') {
+    const t = el.dataset.src === 'paper' ? (S.paper[id] && paperTarget(S.paper[id])) : (bookById(id) && pdfTarget(bookById(id)));
+    if (t) openRatingDialog(t);
+    return;
+  }
   if (a === 'paper-status') {
     const b = S.paper[id];
     if (b) { b.status = el.dataset.status; S.paper[id] = await savePaperBook(b); toast(b.status === 'dropped' ? 'Đã chuyển sang Bỏ dở' : 'Đã chuyển sang Đang đọc'); renderView(); }
