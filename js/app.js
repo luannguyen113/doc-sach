@@ -1207,7 +1207,7 @@ function filteredArticles() {
   const q = S.artQuery.trim().toLowerCase();
   return activeList(S.articles).filter((a) => (!S.artTag || a.tags.includes(S.artTag))
     && (!S.artKind || (S.artKind === 'podcast') === isPodcast(a))
-    && (!q || a.title.toLowerCase().includes(q) || a.source.toLowerCase().includes(q)));
+    && (!q || a.title.toLowerCase().includes(q) || a.source.toLowerCase().includes(q) || (a.note || '').toLowerCase().includes(q)));
 }
 
 // Đầu màn Ghi chép (mở luôn thẻ <main>), dùng chung cho 2 mục Bài viết | Highlight.
@@ -1243,7 +1243,7 @@ function renderArticles() {
         </section>
         ${all.length ? `
         <section class="art-tools" aria-label="Lọc bài viết">
-          <input id="art-q" type="search" placeholder="Tìm theo tiêu đề, nguồn, chương trình" value="${esc(S.artQuery)}" autocomplete="off" aria-label="Tìm bài viết">
+          <input id="art-q" type="search" placeholder="Tìm theo tiêu đề, nguồn, điều tâm đắc" value="${esc(S.artQuery)}" autocomplete="off" aria-label="Tìm bài viết">
           ${all.some(isPodcast) ? `<div class="tagbar" role="group" aria-label="Lọc theo loại">
             ${[['', 'Tất cả', all.length], ['post', 'Bài viết', all.filter((a) => !isPodcast(a)).length], ['podcast', '🎧 Podcast', all.filter(isPodcast).length]]
               .map(([k, l, n]) => `<button type="button" class="tag ${S.artKind === k ? 'on' : ''}" data-action="art-kind" data-kind="${k}" aria-pressed="${S.artKind === k}">${l} <span class="tnum">${n}</span></button>`).join('')}
@@ -1274,10 +1274,11 @@ function artListHtml() {
             : `${esc(a.source)} · đọc ${fmtDate(a.readAt)}`}</span>
         </span>
       </a>
+      ${a.note ? `<button type="button" class="art-note" data-action="art-note" aria-expanded="false" aria-label="Điều tâm đắc – chạm để xem hết">${esc(a.note)}</button>` : ''}
       <div class="art-foot">
         <div class="tags">${a.tags.map((t) => `<button type="button" class="tag sm" data-action="art-tag" data-tag="${esc(t)}">${esc(t)}</button>`).join('') || '<span class="muted xs">Chưa có tag</span>'}</div>
         <div class="art-actions">
-          <button type="button" class="icon-btn sm" data-action="art-edit" data-id="${esc(a.id)}" aria-label="Sửa tiêu đề và tag">${icon('edit', 18)}</button>
+          <button type="button" class="icon-btn sm" data-action="art-edit" data-id="${esc(a.id)}" aria-label="Sửa tiêu đề, tag và điều tâm đắc">${icon('edit', 18)}</button>
           <button type="button" class="icon-btn sm" data-action="art-del" data-id="${esc(a.id)}" aria-label="Xoá bài">${icon('trash', 18)}</button>
         </div>
       </div>
@@ -1323,6 +1324,8 @@ function openArticleEditor({ url, title }) {
       <datalist id="art-show-list">${shows.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
       <label for="art-min">Số phút</label>
       <input id="art-min" type="number" inputmode="numeric" min="1" max="999" value="${prev?.minutes || ''}">` : ''}
+      <label for="art-note">Điều tâm đắc</label>
+      <textarea id="art-note" placeholder="Không bắt buộc: ý hay, câu đáng nhớ, việc muốn thử…">${esc(prev?.note || '')}</textarea>
       <label for="art-tag-in">Tag</label>
       <div class="tag-input">
         <span class="chosen"></span>
@@ -1364,7 +1367,7 @@ function openArticleEditor({ url, title }) {
     addTyped();
     try {
       const extra = pod ? { show: dlg.querySelector('#art-show').value, minutes: dlg.querySelector('#art-min').value, cover } : {};
-      const { existed } = await upsertArticle({ url: id, title: dlg.querySelector('#art-title').value, tags, ...extra });
+      const { existed } = await upsertArticle({ url: id, title: dlg.querySelector('#art-title').value, note: dlg.querySelector('#art-note').value, tags, ...extra });
       S.articles = await loadArticles();
       dlg.close('save');
       toast(existed ? (pod ? 'Đã cập nhật tập' : 'Đã cập nhật bài') : (pod ? 'Đã lưu tập podcast đã nghe' : 'Đã lưu bài đã đọc'));
@@ -2052,6 +2055,7 @@ async function onClick(e) {
     if (p) openPaperEditor(null, { title: p.title, series: p.series, volume: (p.volume || 0) + 1, author: p.author, translator: p.translator, publisher: p.publisher, genre: p.genre, totalPages: p.totalPages });
     return;
   }
+  if (a === 'art-note') { el.setAttribute('aria-expanded', String(el.getAttribute('aria-expanded') !== 'true')); return; }
   if (a === 'paper-log') return openLogDialog(id);
   if (a === 'rate') {
     const t = el.dataset.src === 'paper' ? (S.paper[id] && paperTarget(S.paper[id])) : (bookById(id) && pdfTarget(bookById(id)));

@@ -23,6 +23,11 @@ App đọc sách PDF cá nhân (PWA). Sách lấy từ Google Drive, đọc đư
 - Đánh giá tay: nút “Đánh giá” trên thẻ sách đã đọc xong, “Đánh giá bộ” khi mở rộng thẻ bộ, hoặc trong trang chi tiết sách giấy.
 - Lưu ở `js/ratings.js`, đồng bộ chung file ẩn trên Drive.
 
+## Điều tâm đắc cho bài viết & podcast (v1.11.0)
+- Hộp lưu/sửa bài viết (Substack, web) và tập podcast có ô **Điều tâm đắc** (không bắt buộc, không chấm điểm).
+- Thẻ trong tab Ghi chép → Bài viết hiện 3 dòng đầu, chạm để xem hết. Ô tìm kiếm tìm cả trong điều tâm đắc.
+- Đồng bộ cùng bài viết (trường `note`).
+
 ## Cấu trúc
 - `index.html`, `css/app.css`: giao diện.
 - `js/app.js`: thư viện, quy tắc tải theo mạng, phiên đọc, cài đặt.

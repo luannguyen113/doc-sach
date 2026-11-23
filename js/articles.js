@@ -56,7 +56,7 @@ async function saveAll(map) {
   scheduleSync(5000);
 }
 
-export async function upsertArticle({ url, title, tags, show, minutes, cover }) {
+export async function upsertArticle({ url, title, tags, show, minutes, cover, note }) {
   const map = await loadArticles();
   const id = cleanUrl(url);
   if (!id) throw new Error('Link không hợp lệ');
@@ -73,6 +73,9 @@ export async function upsertArticle({ url, title, tags, show, minutes, cover }) 
     readAt: prev && !prev.deleted ? prev.readAt : now,
     updatedAt: now,
   };
+  // Điều tâm đắc (không chấm điểm). Không truyền thì giữ ghi chú cũ.
+  const n = String(note ?? (prev && !prev.deleted ? prev.note : '') ?? '').trim();
+  if (n) map[id].note = n;
   // Podcast: dùng chung danh sách Bài viết, thêm loại, tên chương trình (= nguồn), số phút, ảnh bìa (link Spotify).
   if (podcast) {
     map[id].kind = 'podcast';

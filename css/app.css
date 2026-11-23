@@ -346,3 +346,12 @@ button.pill { font: inherit; font-size: 11px; background: transparent; cursor: p
 .series-head { flex-wrap: wrap; row-gap: 4px; }
 .series-head .t { min-width: 45%; }
 .series-head svg { margin-left: auto; }
+
+/* Điều tâm đắc của bài viết / podcast (v1.11.0) */
+.art-note { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; width: 100%; margin: 0; padding: 0 0 0 12px; border: none; border-left: 3px solid var(--line); border-radius: 0; background: none; color: var(--text); font: inherit; font-size: 14px; line-height: 1.5; text-align: left; white-space: pre-wrap; cursor: pointer; }
+.art-note[aria-expanded="true"] { display: block; -webkit-line-clamp: unset; }
+/* Link dài trong hộp sửa không được đẩy hộp tràn ngang */
+dialog.sheet { overflow-x: hidden; }
+.pod-head { min-width: 0; }
+.pod-head .url-line { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+#art-note { min-height: 120px; }
